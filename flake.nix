@@ -42,6 +42,7 @@
         ./patches/0006-fix-vdisplay-detect-NixOS-wrapped-compositors-via-pr.patch
         ./patches/0007-fix-nix-strip-host-target-from-package-src.patch
         ./patches/0008-fix-nix-put-system-profile-on-host-service-PATH-for-.patch
+        ./patches/0009-feat-nix-gamescope-track-Valve-master-2271-is-upstr.patch
       ];
 
       pkgsFor =

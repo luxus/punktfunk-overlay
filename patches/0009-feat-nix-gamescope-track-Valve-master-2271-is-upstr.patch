@@ -1,0 +1,310 @@
+From 431dec9ff2f323e7ba79cc86dbb312dae9035fa7 Mon Sep 17 00:00:00 2001
+From: luxus <7449+luxus@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 18:16:56 +0200
+Subject: [PATCH] feat(nix/gamescope): track Valve master; #2271 is upstream
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pin punktfunk-gamescope to gamescope master (ff6b924, 2026-08-01) the
+same way polaris does after dropping the vendored #2271 patch — bSampled
+and vulkan_get_rgb10_capture_format() already live on main.
+
+gamescope.nix now replaces src (not nixpkgs 3.16.x), vendors glm/stb wrap
+deps for the sandbox, and keeps our HDR SPA + cursor + pfhdr patches.
+Refresh 0002 context for the RGB10 helper call.
+---
+ packaging/gamescope/PKGBUILD                  |   6 +-
+ packaging/gamescope/README.md                 |  15 +-
+ .../gamescope/build-punktfunk-gamescope.sh    |   7 +-
+ ...lly-composite-the-cursor-into-the-ca.patch |   2 +-
+ packaging/nix/gamescope.nix                   | 151 ++++++++++--------
+ 5 files changed, 101 insertions(+), 80 deletions(-)
+
+diff --git a/packaging/gamescope/PKGBUILD b/packaging/gamescope/PKGBUILD
+index 17055a61..72550d2e 100644
+--- a/packaging/gamescope/PKGBUILD
++++ b/packaging/gamescope/PKGBUILD
+@@ -17,8 +17,10 @@ pkgname=punktfunk-gamescope
+ # needs it statically here, so it is the one thing that cannot be shared; build() asserts it.
+ # The `.pfhdrN` suffix is the patch-set revision the binary stamps into its banner (see README.md);
+ # bump it with the marker so pacman sees a new version when only our patches moved.
+-_gsver=3.16.25
+-_gsrev=8c676c399c761e4540587f61004c957993d12fea
++# Unstable master pin (2026-08-01); includes upstream #2271. Matches
++# packaging/nix/gamescope.nix + build-punktfunk-gamescope.sh.
++_gsver=0.unstable.2026.08.01
++_gsrev=ff6b924fd0634a51d0fb3755c56c01dca1daadc1
+ pkgver="${_gsver}.pfhdr2"
+ pkgrel=1
+ pkgdesc="gamescope with 10-bit BT.2020/PQ PipeWire capture, for punktfunk HDR streaming"
+diff --git a/packaging/gamescope/README.md b/packaging/gamescope/README.md
+index 6720d87e..d86c14f5 100644
+--- a/packaging/gamescope/README.md
++++ b/packaging/gamescope/README.md
+@@ -11,10 +11,12 @@ The patches here add the missing half, and nothing else. See
+ 
+ | Patch | What | Upstream? |
+ |---|---|---|
+-| `0001-pipewire-offer-10-bit-BT.2020-PQ-capture-formats-HDR.patch` | Offer SPA `xRGB_210LE`/`xBGR_210LE` with MANDATORY SMPTE ST.2084 + BT.2020 props, map them to `DRM_FORMAT_XRGB2101010`/`XBGR2101010`, and composite them with `g_ScreenshotColorMgmtLutsHDR` + `EOTF_PQ` | **Yes** — offered against [gamescope#2126](https://github.com/ValveSoftware/gamescope/issues/2126) |
++| `0001-pipewire-offer-10-bit-BT.2020-PQ-capture-formats-HDR.patch` | Offer SPA `xBGR_210LE` (only) with MANDATORY SMPTE ST.2084 + BT.2020 props, map to `DRM_FORMAT_XBGR2101010`, composite with `g_ScreenshotColorMgmtLutsHDR` + `EOTF_PQ` | **Yes** — HDR PW formats ([gamescope#2126](https://github.com/ValveSoftware/gamescope/issues/2126) / [#2270](https://github.com/ValveSoftware/gamescope/pull/2270)) |
+ | `0002-pipewire-optionally-composite-the-cursor-into-the-ca.patch` | `--pipewire-composite-cursor` (off by default): paint the pointer into the capture stream, using the same `MouseCursor::paint` call the scanout composite uses | **Yes** — independently useful to any consumer with no cursor of its own |
+ | `0003-punktfunk-stamp-the-version-banner-with-pfhdrN.patch` | Append `+pfhdr<N>` to the `--version` banner | **No** — ours only, retired when the two above land upstream |
+ 
++**Already on master (not vendored):** [gamescope#2271](https://github.com/ValveSoftware/gamescope/pull/2271) — `bSampled` on capture textures + `vulkan_get_rgb10_capture_format()` (XBGR fallback on NVIDIA). Same drop as polaris `chore/drop-gamescope-2271-patch`.
++
+ ### Why the cursor patch matters more than it looks
+ 
+ gamescope keeps the pointer out of its PipeWire node — it lives on a hardware plane for scanout —
+@@ -74,14 +76,15 @@ distro's `gamescope`.
+ 
+ ## Building
+ 
+-Pinned upstream: `8c676c39` (master, 2026-07-27 — tags through 3.16.25). The patches apply
+-cleanly to that commit; they touch `src/pipewire.cpp`, `src/steamcompmgr.cpp` and
+-`src/meson.build` only.
++Pinned upstream: `ff6b924` (master, 2026-08-01 — includes #2271). The patches apply
++cleanly to that commit; they touch `src/pipewire.cpp`, `src/steamcompmgr.cpp`,
++`src/main.cpp` and `src/meson.build` only. Nix packaging tracks the same pin via
++`packaging/nix/gamescope.nix` (override of nixpkgs' gamescope with `src` replaced).
+ 
+ ```sh
+ git clone https://github.com/ValveSoftware/gamescope.git
+ cd gamescope
+-git checkout 8c676c39
++git checkout ff6b924fd0634a51d0fb3755c56c01dca1daadc1
+ git submodule update --init --recursive          # or let meson fetch the subprojects
+ git am /path/to/punktfunk/packaging/gamescope/patches/*.patch
+ 
+@@ -127,7 +130,7 @@ must not be decided twice.
+ |---|---|---|
+ | Bazzite / Fedora Atomic | `.gitea/workflows/rpm.yml` → `build-sysext.sh --gamescope` | Inside the matching Fedora container, per major — the binary is soname-coupled to its base exactly like the RPM |
+ | Arch / SteamOS | `.gitea/workflows/arch.yml` → `makepkg` on `./PKGBUILD` | Its own pkgbase in the same pacman repo; `pacman -S punktfunk-gamescope` |
+-| NixOS | `packaging/nix/gamescope.nix` (an `overrideAttrs` on nixpkgs' gamescope) | The one path that does NOT call the script — nixpkgs already solves the submodules, and a nix closure names every library it links |
++| NixOS | `packaging/nix/gamescope.nix` (`overrideAttrs` on nixpkgs' gamescope, **`src` = Valve master pin**) | Does NOT call the script — nixpkgs solves native deps / wrap; we replace `src`, vendor glm/stb wraps, apply our patches |
+ | Anything else | the script, by hand | See *Building* above |
+ 
+ Both CI builds are **cached on `packaging/gamescope/**`** and **best-effort**. Cached because this
+diff --git a/packaging/gamescope/build-punktfunk-gamescope.sh b/packaging/gamescope/build-punktfunk-gamescope.sh
+index 2f15545d..2bfcc35e 100755
+--- a/packaging/gamescope/build-punktfunk-gamescope.sh
++++ b/packaging/gamescope/build-punktfunk-gamescope.sh
+@@ -23,9 +23,10 @@
+ # access unless the checkout already carries them — hence `--recurse-submodules` below.
+ set -euo pipefail
+ 
+-# The pinned upstream. Bump together with the patches (they are `git am`-able and rebase cheaply —
+-# two files, mirroring code that already exists in-tree; see README.md).
+-GAMESCOPE_REV="8c676c399c761e4540587f61004c957993d12fea"
++# The pinned upstream (ValveSoftware/gamescope master tip we ship against).
++# Bump together with packaging/nix/gamescope.nix + the patches (see README.md).
++# #2271 (bSampled + XBGR RGB10) is already on this tip — not a vendored patch.
++GAMESCOPE_REV="ff6b924fd0634a51d0fb3755c56c01dca1daadc1"
+ GAMESCOPE_REPO="https://github.com/ValveSoftware/gamescope.git"
+ 
+ REV="$GAMESCOPE_REV" PREFIX=/usr DESTDIR="" SRCDIR="" JOBS="" SETCAP=1
+diff --git a/packaging/gamescope/patches/0002-pipewire-optionally-composite-the-cursor-into-the-ca.patch b/packaging/gamescope/patches/0002-pipewire-optionally-composite-the-cursor-into-the-ca.patch
+index 32f2b1ce..f01f5584 100644
+--- a/packaging/gamescope/patches/0002-pipewire-optionally-composite-the-cursor-into-the-ca.patch
++++ b/packaging/gamescope/patches/0002-pipewire-optionally-composite-the-cursor-into-the-ca.patch
+@@ -146,7 +146,7 @@ index 01b2abf..5c65420 100644
+ +	}
+ +
+  	gamescope::Rc<CVulkanTexture> pRGBTexture = s_pPipewireBuffer->texture->isYcbcr()
+- 		? vulkan_acquire_capture_texture( uWidth, uHeight, false, DRM_FORMAT_XRGB2101010 )
++ 		? vulkan_acquire_capture_texture( uWidth, uHeight, false, vulkan_get_rgb10_capture_format() )
+  		: gamescope::Rc<CVulkanTexture>{ s_pPipewireBuffer->texture };
+ @@ -8397,6 +8452,12 @@ steamcompmgr_main(int argc, char **argv)
+  					g_FadeOutDuration = atoi(optarg);
+diff --git a/packaging/nix/gamescope.nix b/packaging/nix/gamescope.nix
+index 07e946e7..16e9b4d4 100644
+--- a/packaging/nix/gamescope.nix
++++ b/packaging/nix/gamescope.nix
+@@ -1,41 +1,48 @@
+-# `punktfunk-gamescope` — nixpkgs' gamescope carrying punktfunk's `pipewire-hdr` patches, exposed
+-# under its own name so it sits BESIDE the system gamescope instead of replacing it.
++# `punktfunk-gamescope` — ValveSoftware/gamescope **master** carrying punktfunk's
++# `pipewire-hdr` patches, exposed under its own name so it sits BESIDE the system
++# gamescope instead of replacing it.
+ #
+-# An override rather than a from-scratch derivation on purpose: gamescope vendors wlroots,
+-# vkroots, libliftoff, libdisplay-info, SPIRV-Headers and reshade as git submodules plus two meson
+-# wraps, and nixpkgs already solves all of that. What we add is the patch set and a rename.
++# Tracks master (not only the nixpkgs tag), same stance as polaris/gamescope-polaris:
++# #2271 (bSampled + XBGR RGB10 fallback) is already on main — we do NOT vendor it.
++# Our remaining patches: HDR SPA formats + paint (0001), optional cursor composite
++# (0002), and the +pfhdrN version stamp (0003).
+ #
+-# This is also why the override needs none of the `force_fallback_for` armour
+-# `build-punktfunk-gamescope.sh` carries: that exists because meson silently prefers a SYSTEM
+-# wlroots when the build host has one and links it shared, producing a binary that starts only on
+-# machines with that dev library. A nix closure names every library it links, so the outcome is
+-# whatever nixpkgs' own gamescope already does — reproducibly.
++# An override rather than a from-scratch derivation on purpose: gamescope vendors
++# wlroots, vkroots, libliftoff, … as git submodules; nixpkgs already solves the
++# native deps / wrapProgram / gamescopereaper bake. We replace `src` with a pinned
++# master tip, filter nixpkgs patches that still apply, add ours, and vendor glm/stb
++# wrap-git deps so the sandbox stays offline.
+ #
+-# `gamescope` in nixpkgs is a wrapper (it wires the WSI layer + capabilities); the buildable
+-# derivation is `gamescope.unwrapped` — patching the wrapper would be a no-op, so this asserts on
+-# it rather than silently shipping an unpatched binary.
+-#
+-# Version drift: the patches are applied to whatever gamescope your nixpkgs pins, NOT to the
+-# commit `packaging/gamescope/build-punktfunk-gamescope.sh` names. Both hunks sit in code that has
+-# been stable across the 3.16 series (`src/pipewire.cpp`'s format builders, `paint_pipewire()` in
+-# `src/steamcompmgr.cpp`), so this normally just works — and when it does not, the build fails
+-# loudly at `patchPhase` rather than producing a gamescope that quietly cannot do HDR.
++# Bump: update `gamescopeRev` + `src.hash` (and glm/stb only if wraps move), then
++# re-check `packaging/gamescope/patches/*` apply cleanly.
+ {
+   lib,
+   gamescope,
++  fetchFromGitHub,
+   patchDir,
+ }:
+ let
+-  # As of nixos-unstable (checked 2026-07-28) `gamescope` IS the buildable derivation — pname
+-  # "gamescope", version 3.16.25, carrying `src`/`patches`/`mesonFlags`. Revisions that wrap it
+-  # (to wire the WSI layer + capabilities) expose the build as `.unwrapped`, so prefer that where
+-  # it exists and take `gamescope` itself otherwise.
+-  #
+-  # The check is on the RESULT, not on which attribute we found: `overrideAttrs` on a symlinkJoin
+-  # wrapper succeeds and does nothing, which would hand us an UNPATCHED gamescope installed under
+-  # our own name — the single worst outcome here, because the host reads the name as a promise of
+-  # HDR. (`installCheckPhase` below greps for the marker as the second line of defence; this one
+-  # fails at eval, before anything is built.)
++  # Master tip 2026-08-01 — includes ValveSoftware/gamescope#2271.
++  # Same pin as polaris `chore/drop-gamescope-2271-patch`.
++  gamescopeRev = "ff6b924fd0634a51d0fb3755c56c01dca1daadc1";
++
++  # Master switched glm/stb from system headers to meson wrap-git subprojects.
++  # Vendoring keeps wrap_mode=nodownload happy in the nix sandbox.
++  glmSrc = fetchFromGitHub {
++    owner = "g-truc";
++    repo = "glm";
++    rev = "0af55ccecd98d4e5a8d1fad7de25ba429d60e863";
++    hash = "sha256-GnGyzNRpzuguc3yYbEFtYLvG+KiCtRAktiN+NvbOICE=";
++  };
++  stbSrc = fetchFromGitHub {
++    owner = "nothings";
++    repo = "stb";
++    rev = "5736b15f7ea0ffb08dd38af21067c314d6a3aae9";
++    hash = "sha256-s2ASdlT3bBNrqvwfhhN6skjbmyEnUgvNOrvhgUSRj98=";
++  };
++
++  # As of nixos-unstable (checked 2026-07-28) `gamescope` IS the buildable
++  # derivation. Revisions that wrap it expose the build as `.unwrapped`.
+   base = gamescope.unwrapped or gamescope;
+   unwrapped =
+     if base ? src then
+@@ -50,51 +57,59 @@ let
+ in
+ unwrapped.overrideAttrs (old: {
+   pname = "punktfunk-gamescope";
++  version = "0-unstable-2026-08-01";
+ 
+-  # Read the patch DIRECTORY rather than naming files: `builtins.attrNames` sorts
+-  # lexicographically, which for `000N-` prefixes is exactly the apply order, and a patch added or
+-  # renamed upstream of this file can no longer leave nix silently building a subset. (That already
+-  # happened once — this list still named the level-1 banner patch after level 2 landed, so a nix
+-  # build would have shipped a binary with no cursor patch and a marker claiming otherwise.)
++  src = fetchFromGitHub {
++    owner = "ValveSoftware";
++    repo = "gamescope";
++    rev = gamescopeRev;
++    fetchSubmodules = true;
++    hash = "sha256-WkaTWBZuUR/EPMb7btuqIgK2M8HivEYBWLwrMDsxVwY=";
++  };
++
++  # Keep only nixpkgs packaging patches that still apply on master.
++  # Pending upstream fetchpatches on 3.16.x are already in this tip.
++  # Our patches: read the DIRECTORY (lexicographic 000N- order).
+   patches =
+-    (old.patches or [ ])
++    (builtins.filter (
++      p:
++      let
++        s = toString p;
++      in
++      lib.hasInfix "shaders-path" s || lib.hasInfix "gamescopereaper" s
++    ) (old.patches or [ ]))
+     ++ map (f: "${patchDir}/${f}") (
+       builtins.filter (lib.hasSuffix ".patch") (builtins.attrNames (builtins.readDir patchDir))
+     );
+ 
+-  # nixpkgs builds from a `fetchFromGitHub` src, so there is no `.git` for `git describe` and the
+-  # banner would read `+pfhdr2 (gcc …)` with no version at all — which the host's diagnostic
+-  # version gate then misreads (it takes the first X.Y.Z triple it finds, i.e. the compiler's).
+-  # Substituting the real version in keeps `--version` honest AND keeps our marker.
+-  postPatch = (old.postPatch or "") + ''
+-    substituteInPlace src/meson.build \
+-      --replace-fail \
+-        "vcs_tag = run_command(vcs_tag_cmd, check: false).stdout().strip()" \
+-        "vcs_tag = '${old.version}'"
+-  '';
++  # Master dropped glm_include_dir / stb_include_dir meson options.
++  mesonFlags = [
++    (lib.mesonBool "enable_gamescope" true)
++    (lib.mesonBool "enable_gamescope_wsi_layer" true)
++    (lib.mesonBool "enable_tests" false)
++  ];
++
++  # Materialize glm/stb wrap-git deps from nix store, then stamp a real version
++  # into meson (no `.git` on the fetchFromGitHub src).
++  postPatch =
++    (old.postPatch or "")
++    + ''
++      rm -rf subprojects/glm subprojects/stb
++      cp -a ${glmSrc} subprojects/glm
++      cp -a ${stbSrc} subprojects/stb
++      chmod -R u+w subprojects/glm subprojects/stb
++      cp -f subprojects/packagefiles/glm/meson.build subprojects/glm/meson.build
++      cp -f subprojects/packagefiles/stb/meson.build subprojects/stb/meson.build
++
++      substituteInPlace src/meson.build \
++        --replace-fail \
++          "vcs_tag = run_command(vcs_tag_cmd, check: false).stdout().strip()" \
++          "vcs_tag = '${gamescopeRev}'"
++    '';
+ 
+-  # Expose the compositor under our own name, ADDITIVELY — a symlink beside nixpkgs' own layout
+-  # rather than a rename plus a sweep of everything else.
+-  #
+-  # The sweep this replaces (`find $out ! -name bin -exec rm -rf {} +`, `find $out/bin ! -name
+-  # gamescope -delete`, `mv gamescope punktfunk-gamescope`) assumed a plain meson install, the way
+-  # the Arch PKGBUILD gets one. Against nixpkgs' recipe it breaks three ways, all caused by what
+-  # nixpkgs' OWN postInstall does immediately before ours runs:
+-  #
+-  #   1. It copies the ReShade shaders out of the store (`cp -r ${frogShaders}/* …`), which
+-  #      preserves mode 555 on the directories — so the `rm -rf` fails with a pile of
+-  #      `Permission denied` and takes the build down with it.
+-  #   2. It runs `wrapProgram $out/bin/gamescope`, leaving the real ELF at `.gamescope-wrapped`;
+-  #      the `-delete` sweep removes exactly that, so the renamed wrapper would exec a file that
+-  #      no longer exists (and `installCheckPhase` below would catch it).
+-  #   3. It bakes an absolute `$out/bin/gamescopereaper` into the binary (`substituteInPlace
+-  #      src/Utils/Process.cpp --subst-var-by "gamescopereaper" …`). The reaper is what launches
+-  #      the nested `-- <app>`, i.e. the host's bare-spawn path — deleting it produces a package
+-  #      that builds fine and fails at stream time.
+-  #
+-  # Keeping nixpkgs' output intact costs nothing here: this package lands on the punktfunk-host
+-  # unit's PATH, not a user profile, and `gamescope_bin()` looks for `punktfunk-gamescope` first,
+-  # so the plain `gamescope` name sitting next to it is never picked by accident.
++  # Expose the compositor under our own name, ADDITIVELY — a symlink beside
++  # nixpkgs' own layout rather than a rename plus a sweep of everything else.
++  # (See git history: sweeping breaks wrapProgram / gamescopereaper / ReShade.)
+   postInstall = (old.postInstall or "") + ''
+     ln -s gamescope $out/bin/punktfunk-gamescope
+   '';
+@@ -109,7 +124,7 @@ unwrapped.overrideAttrs (old: {
+   '';
+ 
+   meta = (old.meta or { }) // {
+-    description = "gamescope with 10-bit BT.2020/PQ PipeWire capture, for punktfunk HDR streaming";
++    description = "gamescope master (${lib.substring 0 7 gamescopeRev}) with 10-bit BT.2020/PQ PipeWire capture (+ #2271 in-tree), for punktfunk HDR streaming";
+     mainProgram = "punktfunk-gamescope";
+   };
+ })
+-- 
+2.55.0
+

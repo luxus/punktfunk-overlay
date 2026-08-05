@@ -53,7 +53,7 @@ git format-patch origin/main -o /path/to/punktfunk-overlay/patches
 
 ## Current patch series
 
-See `patches/0001-…` through `0008-…` — Nix packaging fixes, KWin Nix wrap detection, steam on host PATH, HDR colour/channel-order knobs, etc.
+See `patches/0001-…` through `0009-…` — Nix packaging fixes, KWin Nix wrap detection, steam on host PATH, HDR colour/channel-order knobs, gamescope master pin (#2271 in-tree), etc.
 
 ## Local drop-ins
 
