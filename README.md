@@ -58,3 +58,14 @@ See `patches/0001-…` through `0008-…` — Nix packaging fixes, KWin Nix wrap
 ## Local drop-ins
 
 Session-specific systemd drop-ins (e.g. `~/.config/systemd/user/punktfunk-host.service.d/extra-path.conf`) stay on the machine; the module PATH fix lands in-tree via patch `0008` so a clean deploy does not need the drop-in after rebuild.
+
+## Layout
+
+```
+patches/          # format-patch series on unom/main
+modules/          # vendored nixos-module.nix (patched) — pure imports, no IFD
+flake.nix         # applyPatches → crane packages from packaging/nix
+```
+
+When you change only packaging/nix on a patch refresh, also re-copy
+`packaging/nix/nixos-module.nix` → `modules/nixos-module.nix`.

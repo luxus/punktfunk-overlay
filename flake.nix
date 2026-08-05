@@ -12,8 +12,7 @@
       url = "github:nix-community/bun2nix?ref=2.1.2";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # Upstream source (not a flake input for packages — we patch then build).
-    # Bump with: nix flake update punktfunk-src
+    # Upstream source. Bump: nix flake update punktfunk-src
     punktfunk-src = {
       url = "git+https://git.unom.io/unom/punktfunk";
       flake = false;
@@ -33,8 +32,7 @@
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
-      # Ordered patch series (git format-patch unom/main..local).
-      # Add new fixes here; re-export stays stable for consumers.
+      # Ordered patch series (git format-patch against unom/main).
       overlayPatches = [
         ./patches/0001-fix-nix-regenerate-web-bun.nix-stop-gamescope.nix-de.patch
         ./patches/0002-feat-encode-nvenc-name-who-did-the-RGB-YUV-conversio.patch
@@ -53,7 +51,8 @@
           overlays = [ (import rust-overlay) ];
         };
 
-      toolchainFor = pkgs: pkgs.rust-bin.fromRustupToolchainFile (punktfunk-src + "/rust-toolchain.toml");
+      toolchainFor =
+        pkgs: pkgs.rust-bin.fromRustupToolchainFile (punktfunk-src + "/rust-toolchain.toml");
       craneLibFor = pkgs: (crane.mkLib pkgs).overrideToolchain toolchainFor;
 
       version =
@@ -68,6 +67,7 @@
             src = punktfunk-src;
             patches = overlayPatches;
           };
+          # packaging/*.nix after patches (includes packages.nix src clean + gamescope.nix fix)
           pf = pkgs.callPackage (patchedSrc + "/packaging/nix/packages.nix") {
             craneLib = craneLibFor pkgs;
             src = patchedSrc;
@@ -82,46 +82,19 @@
         // {
           punktfunk-gamescope = gamescope;
           default = pf.punktfunk-host;
-          # Expose patched tree for debugging / further packaging
-          punktfunk-src-patched = patchedSrc;
-        };
-
-      # self-shaped attrset the upstream nixos-module expects (`self.packages.${system}....`).
-      moduleSelfFor =
-        system:
-        {
-          packages.${system} = packagesFor system;
         };
     in
     {
       packages = forAllSystems packagesFor;
 
-      # Drop-in replacement for inputs.punktfunk.nixosModules.default
-      nixosModules.default =
-        { pkgs, ... }:
-        let
-          system = pkgs.stdenv.hostPlatform.system;
-        in
-        {
-          imports = [
-            (import ((packagesFor system).punktfunk-src-patched + "/packaging/nix/nixos-module.nix") (
-              moduleSelfFor system
-            ))
-          ];
-        };
-
-      # Convenience alias
+      # Vendored module (from patched tree) — no import-from-derivation on `imports`.
+      # Package defaults resolve via `self.packages.${system}` like upstream.
+      nixosModules.default = import ./modules/nixos-module.nix self;
       nixosModules.punktfunk = self.nixosModules.default;
 
-      checks = forAllSystems (
-        system:
-        let
-          pf = self.packages.${system};
-        in
-        {
-          inherit (pf) punktfunk-host punktfunk-tray;
-        }
-      );
+      checks = forAllSystems (system: {
+        inherit (self.packages.${system}) punktfunk-host punktfunk-tray;
+      });
 
       formatter = forAllSystems (system: (pkgsFor system).nixfmt-rfc-style);
     };
