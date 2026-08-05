@@ -1,0 +1,234 @@
+From 68fc2cb483713241d6080d5a9a5985a8f6b7afca Mon Sep 17 00:00:00 2001
+From: luxus <7449+luxus@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 15:34:52 +0200
+Subject: [PATCH 6/8] fix(vdisplay): detect NixOS-wrapped compositors via
+ /proc/comm
+
+Nix rewrites binaries to .<name>-wrapped; TASK_COMM_LEN truncates that to
+forms like .kwin_wayland-w, so exact "kwin_wayland" matching missed a live
+KWin session and the host reported no usable compositor.
+
+Match exact names and Nix wrap truncations (hyphen suffix), skip the
+_wrapper helper, and reuse the same logic for foreign gamescope scans.
+Also expose bindToGraphicalSession on the NixOS module so desktop restarts
+refresh the host's Wayland/portal connections.
+---
+ .../src/vdisplay/linux/gamescope.rs           |  5 +-
+ crates/pf-vdisplay/src/vdisplay/session.rs    | 90 ++++++++++++++++---
+ packaging/nix/README.md                       |  5 +-
+ packaging/nix/nixos-module.nix                | 30 ++++++-
+ 4 files changed, 115 insertions(+), 15 deletions(-)
+
+diff --git a/crates/pf-vdisplay/src/vdisplay/linux/gamescope.rs b/crates/pf-vdisplay/src/vdisplay/linux/gamescope.rs
+index 8c9a29f6..adb19f5d 100644
+--- a/crates/pf-vdisplay/src/vdisplay/linux/gamescope.rs
++++ b/crates/pf-vdisplay/src/vdisplay/linux/gamescope.rs
+@@ -630,7 +630,10 @@ pub fn foreign_gamescope_running() -> bool {
+         let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) else {
+             continue;
+         };
+-        if !matches!(comm.trim(), "gamescope" | "gamescope-wl") {
++        // `comm_is` also covers NixOS `.<name>-wrapped` truncations (TASK_COMM_LEN=15).
++        if !(crate::session::comm_is(comm.trim(), "gamescope")
++            || crate::session::comm_is(comm.trim(), "gamescope-wl"))
++        {
+             continue;
+         }
+         if !descends_from(pid, our_pid) {
+diff --git a/crates/pf-vdisplay/src/vdisplay/session.rs b/crates/pf-vdisplay/src/vdisplay/session.rs
+index d95e6cc9..490d2f48 100644
+--- a/crates/pf-vdisplay/src/vdisplay/session.rs
++++ b/crates/pf-vdisplay/src/vdisplay/session.rs
+@@ -311,8 +311,8 @@ pub fn detect_active_session() -> ActiveSession {
+     let dbus = default_bus(&env, &xdg_runtime_dir);
+ 
+     // Process probe: the running graphical compositor of THIS uid decides the kind. Priority lets
+-    // a real desktop (kwin/gnome/sway) win over a leftover gamescope child. comm names mirror the
+-    // `pkill -x` discipline (exact, ≤15 chars so untruncated).
++    // a real desktop (kwin/gnome/sway) win over a leftover gamescope child. Matching is via
++    // [`comm_is`] (exact `comm`, plus NixOS `.<name>-wrapped` truncations — TASK_COMM_LEN is 15).
+     let mut kind = ActiveKind::None;
+     let mut best = 0u8;
+     // The winning compositor's PID — kept so a same-kind compositor RESTART (a new PID) bumps the
+@@ -335,15 +335,8 @@ pub fn detect_active_session() -> ActiveSession {
+             let Ok(comm) = std::fs::read_to_string(pid_path.join("comm")) else {
+                 continue;
+             };
+-            let (k, prio) = match comm.trim() {
+-                "gamescope" | "gamescope-wl" => (ActiveKind::Gaming, 1),
+-                "kwin_wayland" => (ActiveKind::DesktopKde, 4),
+-                "gnome-shell" => (ActiveKind::DesktopGnome, 4),
+-                // Hyprland is its own backend (hyprctl + xdph) — split it out of the sway/river
+-                // wlroots-proper family (design/hyprland-support.md D1).
+-                "Hyprland" | "hyprland" => (ActiveKind::DesktopHyprland, 4),
+-                "sway" | "river" => (ActiveKind::DesktopWlroots, 4),
+-                _ => continue,
++            let Some((k, prio)) = classify_compositor_comm(comm.trim()) else {
++                continue;
+             };
+             let pid = name.parse::<u32>().ok();
+             if prio > best {
+@@ -410,6 +403,50 @@ pub fn detect_active_session() -> ActiveSession {
+     }
+ }
+ 
++/// True when `/proc/<pid>/comm` names the binary `name`.
++///
++/// On distro packages this is usually an exact match (`kwin_wayland`). On NixOS the real
++/// executable is rewritten to `.<name>-wrapped`, and the kernel only stores the first 15 bytes of
++/// that basename in `comm` (`TASK_COMM_LEN`), so a live KWin shows up as `.kwin_wayland-w` rather
++/// than `kwin_wayland`. A leading `.` is stripped; anything that then equals `name` or continues
++/// with `-` (the wrap/truncation suffix) counts.
++///
++/// The `_wrapper` helper process is deliberately not matched: its basename is
++/// `.<name>_wrapper-wrapped` → e.g. `.kwin_wayland_w`, which continues with `_` rather than `-`.
++#[cfg(target_os = "linux")]
++pub(crate) fn comm_is(comm: &str, name: &str) -> bool {
++    let c = comm.trim();
++    if c == name {
++        return true;
++    }
++    let c = c.strip_prefix('.').unwrap_or(c);
++    c == name || c.starts_with(&format!("{name}-"))
++}
++
++/// Map a `/proc/<pid>/comm` string to `(kind, priority)` for the live-session probe, or `None`
++/// when it is not a compositor we drive. Priority lets a real desktop beat a leftover gamescope.
++#[cfg(target_os = "linux")]
++fn classify_compositor_comm(comm: &str) -> Option<(ActiveKind, u8)> {
++    if comm_is(comm, "gamescope") || comm_is(comm, "gamescope-wl") {
++        return Some((ActiveKind::Gaming, 1));
++    }
++    if comm_is(comm, "kwin_wayland") {
++        return Some((ActiveKind::DesktopKde, 4));
++    }
++    if comm_is(comm, "gnome-shell") {
++        return Some((ActiveKind::DesktopGnome, 4));
++    }
++    // Hyprland is its own backend (hyprctl + xdph) — split it out of the sway/river
++    // wlroots-proper family (design/hyprland-support.md D1).
++    if comm_is(comm, "Hyprland") || comm_is(comm, "hyprland") {
++        return Some((ActiveKind::DesktopHyprland, 4));
++    }
++    if comm_is(comm, "sway") || comm_is(comm, "river") {
++        return Some((ActiveKind::DesktopWlroots, 4));
++    }
++    None
++}
++
+ /// Find the live Hyprland instance signature (`HYPRLAND_INSTANCE_SIGNATURE`) for our uid. Trust a
+ /// valid inherited value first (the host launched inside the session); otherwise pick the
+ /// newest-mtime instance directory under `$XDG_RUNTIME_DIR/hypr/` that we own and that still has a
+@@ -699,6 +736,37 @@ pub fn settle_desktop_portal(_chosen: Compositor) {}
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn comm_is_matches_exact_and_nix_wrapped_truncations() {
++        // Distro package: bare basename.
++        assert!(comm_is("kwin_wayland", "kwin_wayland"));
++        assert!(comm_is("kwin_wayland\n", "kwin_wayland"));
++        // NixOS: `.<name>-wrapped` truncated to TASK_COMM_LEN (15).
++        assert!(comm_is(".kwin_wayland-w", "kwin_wayland"));
++        assert!(comm_is(".gamescope-wrap", "gamescope"));
++        assert!(comm_is(".gnome-shell-wr", "gnome-shell"));
++        assert!(comm_is(".Hyprland-wrapp", "Hyprland"));
++        // Full untruncated wrap form (short names fit in 15).
++        assert!(comm_is(".sway-wrapped", "sway"));
++        // Negatives: unrelated, and the Nix `_wrapper` helper (underscore, not hyphen).
++        assert!(!comm_is("kwin_x11", "kwin_wayland"));
++        assert!(!comm_is(".kwin_wayland_w", "kwin_wayland"));
++        assert!(!comm_is("not-kwin", "kwin_wayland"));
++    }
++
++    #[test]
++    fn classify_compositor_comm_nix_kwin_is_desktop_kde() {
++        let (k, prio) = classify_compositor_comm(".kwin_wayland-w").unwrap();
++        assert_eq!(k, ActiveKind::DesktopKde);
++        assert_eq!(prio, 4);
++        // Wrapper process must not steal the detection.
++        assert!(classify_compositor_comm(".kwin_wayland_w").is_none());
++        assert_eq!(
++            classify_compositor_comm("gamescope-wl").map(|(k, _)| k),
++            Some(ActiveKind::Gaming)
++        );
++    }
++
+     /// A scratch runtime dir with the sway-ipc sockets named in `pids`, plus the uid the names are
+     /// built from. Removed on drop.
+     struct FakeRuntime {
+diff --git a/packaging/nix/README.md b/packaging/nix/README.md
+index 500fea5f..7bd873dc 100644
+--- a/packaging/nix/README.md
++++ b/packaging/nix/README.md
+@@ -99,6 +99,7 @@ systemctl --user enable --now punktfunk-host
+ | `enable` | `false` | Install the host + wire udev/sysctl/kernel-modules/firewall and the user service. |
+ | `gamestream` | `true` | `serve --gamestream` (Moonlight-compatible). `false` = native-only, more secure. |
+ | `autoStart` | `false` | Add the user service to `default.target` (appliance mode — pair with lingering). |
++| `bindToGraphicalSession` | `true` | `After`/`PartOf`/`WantedBy` `graphical-session.target` so a desktop compositor restart restarts the host (declarative `punktfunk-host-desktop-session.conf`). Set `false` for headless appliances that never reach GS. |
+ | `users` | `[ ]` | Users added to the `input` group (virtual gamepads). |
+ | `settings` | `{ }` | `host.env` key/values (see `${package}/share/punktfunk-host/host.env.example`). |
+ | `environmentFile` | `null` | Extra `EnvironmentFile` for secrets (e.g. `PUNKTFUNK_MGMT_TOKEN`); loaded optionally. |
+@@ -145,7 +146,9 @@ un-started; turn it on with `systemctl --user enable --now punktfunk-scripting`.
+ Everything the RPM's `%install` + `%post` do, declaratively:
+ 
+ - **systemd `--user` service** `punktfunk-host` → `serve [--gamestream]`, `EnvironmentFile` from
+-  `settings` (+ optional secret file), `Restart=on-failure`.
++  `settings` (+ optional secret file), `Restart=on-failure`. With `bindToGraphicalSession`
++  (default), also `PartOf`/`WantedBy` `graphical-session.target` so a desktop restart refreshes
++  compositor connections.
+ - **udev rules** (`60-punktfunk.rules`): `/dev/uinput` + `/dev/uhid` group access and the vhci
+   sysfs perms for the virtual Steam Deck.
+ - **kernel modules**: `uinput`, `uhid`, `vhci-hcd` (usbip transport so Steam Input adopts the
+diff --git a/packaging/nix/nixos-module.nix b/packaging/nix/nixos-module.nix
+index 11c12b24..d3c758c8 100644
+--- a/packaging/nix/nixos-module.nix
++++ b/packaging/nix/nixos-module.nix
+@@ -106,6 +106,24 @@ in
+         '';
+       };
+ 
++      # Mirrors scripts/punktfunk-host-desktop-session.conf — see docs/running-as-a-service
++      # ("Restart the host with your desktop") and docs/kde for the interactive KDE path.
++      bindToGraphicalSession = mkOption {
++        type = types.bool;
++        default = true;
++        description = ''
++          Bind the host unit to `graphical-session.target` (`After`/`PartOf`/`WantedBy`), so a
++          Plasma, kwin-noctalia, or GNOME restart restarts the host instead of leaving it holding
++          a dead Wayland socket and portal connection. This is the declarative form of
++          `punktfunk-host-desktop-session.conf`.
++
++          Keep this on for a machine you log into. Set to `false` for a headless appliance that
++          never reaches `graphical-session.target` (pinned `PUNKTFUNK_COMPOSITOR`,
++          `punktfunk-kde-session`, or a gamescope-only box) — otherwise the unit can end up
++          permanently stopped after a partial session teardown.
++        '';
++      };
++
+       users = mkOption {
+         type = types.listOf types.str;
+         default = [ ];
+@@ -340,9 +358,17 @@ in
+         description = "punktfunk GameStream + punktfunk/1 streaming host";
+         documentation = [ "https://git.unom.io/unom/punktfunk" ];
+         # Soft ordering: the host listens immediately and only touches the compositor per session.
+-        after = [ "pipewire.service" ];
++        # When bindToGraphicalSession: also after/partOf GS so a desktop restart refreshes the
++        # Wayland + portal connections (scripts/punktfunk-host-desktop-session.conf).
++        after = [ "pipewire.service" ] ++ optional cfg.host.bindToGraphicalSession "graphical-session.target";
+         wants = [ "pipewire.service" ];
+-        wantedBy = optional cfg.host.autoStart "default.target";
++        partOf = optional cfg.host.bindToGraphicalSession "graphical-session.target";
++        # default.target: early listen at login (autoStart). graphical-session.target: re-pull on
++        # compositor restart when bindToGraphicalSession (in addition to default, same as the
++        # packaged drop-in's WantedBy).
++        wantedBy =
++          optional cfg.host.autoStart "default.target"
++          ++ optional cfg.host.bindToGraphicalSession "graphical-session.target";
+         # The host may exec external helpers (pw-dump, sh, and — for the gamescope/kwin backends —
+         # the compositor). Extend this in your config for a headless gamescope/KWin appliance.
+         path = [
+-- 
+2.55.0
+

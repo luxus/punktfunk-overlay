@@ -1,0 +1,280 @@
+From 2f000974fd5767b3460343405c16fc2b1b5266a4 Mon Sep 17 00:00:00 2001
+From: Volodymyr Kravchenko <volandevo@gmail.com>
+Date: Tue, 4 Aug 2026 03:31:30 +0300
+Subject: [PATCH 3/8] fix(host/colour): apply the colour override to the
+ handshake too, not just the VUI
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A session describes its colour twice — in the bitstream VUI, and in the
+punktfunk/1 `ColorInfo` the handshake carries — and clients read one or the
+other. The previous commit moved only the VUI, which is invisible to a client
+that configures itself from the handshake.
+
+The webOS/LG client is exactly that client: it hands `ColorInfo.matrix` straight
+to `NDL_DirectVideoSetHDRInfo` and never parses the VUI, so on an LG panel the
+override changed nothing on the glass while the log showed it applied. The two
+fields describe the same conversion, so they now resolve the same knob: the
+name→CICP parsing moved to `pf-host-config` (a crate both the encoder and the
+handshake already depend on) and each side only translates.
+
+`handshake.rs` had the premise written down — "BT.2020 PQ, what the NVENC HEVC
+VUI emits from a 10-bit capture format" — which is where the shared mistake
+came from: the handshake was made to mirror the VUI, and the VUI was assumed
+rather than measured.
+
+Measured, on an RTX 5090 (identical at 720p/1080p/4K, and identical whether or
+not the stream declares BT.2020, so the internal CSC does not read these
+fields): feeding NVENC packed RGB and decoding the result back lands on BT.601
+limited to within 0.13 code values, against 24-61 for every other candidate.
+So a 10-bit session declares BT.2020 NCL and ships BT.601.
+
+Still no guessed default: unset, both sides are byte-for-byte unchanged.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ crates/pf-encode/src/enc/nvenc_core.rs        | 111 +++++++-----------
+ crates/pf-host-config/src/lib.rs              |  48 ++++++++
+ crates/punktfunk-host/src/native/handshake.rs |  23 +++-
+ 3 files changed, 112 insertions(+), 70 deletions(-)
+
+diff --git a/crates/pf-encode/src/enc/nvenc_core.rs b/crates/pf-encode/src/enc/nvenc_core.rs
+index 34ef52f4..f54c94e6 100644
+--- a/crates/pf-encode/src/enc/nvenc_core.rs
++++ b/crates/pf-encode/src/enc/nvenc_core.rs
+@@ -359,39 +359,33 @@ mod tests {
+         }
+     }
+ 
++    /// The knob is parsed once, in `pf-host-config`, and translated here. The translation must
++    /// agree with the code point the handshake will put in `ColorInfo.matrix` for the same input —
++    /// a stream that describes itself two different ways is the bug this whole path is about.
+     #[test]
+-    fn vui_matrix_names_map_to_their_cicp_points() {
++    fn cicp_points_translate_to_the_matching_nvenc_variant() {
+         use nv::NV_ENC_VUI_MATRIX_COEFFS as M;
+-        assert_eq!(
+-            parse_vui_matrix("bt709"),
+-            Some(M::NV_ENC_VUI_MATRIX_COEFFS_BT709)
+-        );
+-        assert_eq!(
+-            parse_vui_matrix(" BT2020NCL "),
+-            Some(M::NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL)
+-        );
+-        // The 601 pair is one matrix under two names; both spellings have to land on it, since
+-        // "NVENC used 601" is the hypothesis this knob exists to test.
+-        assert_eq!(
+-            parse_vui_matrix("bt601"),
+-            Some(M::NV_ENC_VUI_MATRIX_COEFFS_BT470BG)
+-        );
+-        assert_eq!(
+-            parse_vui_matrix("smpte170m"),
+-            Some(M::NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M)
+-        );
+-        // Garbage must leave the derived value alone rather than resolve to some default.
+-        assert_eq!(parse_vui_matrix("bt2021"), None);
+-        assert_eq!(parse_vui_matrix(""), None);
+-    }
+-
+-    #[test]
+-    fn vui_full_range_takes_both_spellings_and_rejects_the_rest() {
+-        assert_eq!(parse_vui_full_range("1"), Some(1));
+-        assert_eq!(parse_vui_full_range("full"), Some(1));
+-        assert_eq!(parse_vui_full_range("0"), Some(0));
+-        assert_eq!(parse_vui_full_range(" Limited "), Some(0));
+-        assert_eq!(parse_vui_full_range("yes"), None);
++        for (name, cicp, variant) in [
++            ("bt709", 1u8, M::NV_ENC_VUI_MATRIX_COEFFS_BT709),
++            ("bt601", 5, M::NV_ENC_VUI_MATRIX_COEFFS_BT470BG),
++            ("smpte170m", 6, M::NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M),
++            ("bt2020ncl", 9, M::NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL),
++        ] {
++            assert_eq!(
++                pf_host_config::parse_cicp_matrix(name),
++                Some(cicp),
++                "{name} must parse to CICP {cicp}"
++            );
++            assert_eq!(
++                cicp_to_nvenc_matrix(cicp),
++                Some(variant),
++                "CICP {cicp} must reach the matching NVENC variant"
++            );
++        }
++        // Garbage leaves the derived value alone rather than resolving to some default.
++        assert_eq!(pf_host_config::parse_cicp_matrix("bt2021"), None);
++        assert_eq!(pf_host_config::parse_cicp_matrix(""), None);
++        assert_eq!(cicp_to_nvenc_matrix(3), None); // H.273 "reserved"
+     }
+ 
+     #[test]
+@@ -674,29 +668,30 @@ mod range_policy_tests {
+ /// Accepts the CICP names (`bt709`, `bt2020ncl`, `bt470bg`/`bt601`, `smpte170m`, …); an
+ /// unrecognised value warns and is ignored rather than silently selecting something.
+ fn vui_matrix_override() -> Option<nv::NV_ENC_VUI_MATRIX_COEFFS> {
+-    parse_vui_matrix(&std::env::var("PUNKTFUNK_VUI_MATRIX").ok()?)
++    cicp_to_nvenc_matrix(pf_host_config::vui_matrix_override()?)
+ }
+ 
+-/// The name→CICP mapping behind [`vui_matrix_override`], split out for testability: env vars are
+-/// process-global, so a test that set one would race the parallel suite.
+-fn parse_vui_matrix(raw: &str) -> Option<nv::NV_ENC_VUI_MATRIX_COEFFS> {
++/// H.273 code point → the NVENC enum. The parsing itself lives in `pf-host-config` so the
++/// handshake's `ColorInfo` resolves the SAME knob to the SAME value; this only translates.
++/// A code point NVENC has no variant for keeps the derived value rather than guessing.
++fn cicp_to_nvenc_matrix(cicp: u8) -> Option<nv::NV_ENC_VUI_MATRIX_COEFFS> {
+     use nv::NV_ENC_VUI_MATRIX_COEFFS as M;
+-    Some(match raw.trim().to_ascii_lowercase().as_str() {
+-        "rgb" => M::NV_ENC_VUI_MATRIX_COEFFS_RGB,
+-        "bt709" | "709" => M::NV_ENC_VUI_MATRIX_COEFFS_BT709,
+-        "unspecified" => M::NV_ENC_VUI_MATRIX_COEFFS_UNSPECIFIED,
+-        "fcc" => M::NV_ENC_VUI_MATRIX_COEFFS_FCC,
+-        "bt470bg" | "bt601" | "601" => M::NV_ENC_VUI_MATRIX_COEFFS_BT470BG,
+-        "smpte170m" | "170m" => M::NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M,
+-        "smpte240m" | "240m" => M::NV_ENC_VUI_MATRIX_COEFFS_SMPTE240M,
+-        "ycgco" => M::NV_ENC_VUI_MATRIX_COEFFS_YCGCO,
+-        "bt2020ncl" | "bt2020_ncl" | "2020ncl" => M::NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL,
+-        "bt2020cl" | "bt2020_cl" | "2020cl" => M::NV_ENC_VUI_MATRIX_COEFFS_BT2020_CL,
+-        "smpte2085" => M::NV_ENC_VUI_MATRIX_COEFFS_SMPTE2085,
++    Some(match cicp {
++        0 => M::NV_ENC_VUI_MATRIX_COEFFS_RGB,
++        1 => M::NV_ENC_VUI_MATRIX_COEFFS_BT709,
++        2 => M::NV_ENC_VUI_MATRIX_COEFFS_UNSPECIFIED,
++        4 => M::NV_ENC_VUI_MATRIX_COEFFS_FCC,
++        5 => M::NV_ENC_VUI_MATRIX_COEFFS_BT470BG,
++        6 => M::NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M,
++        7 => M::NV_ENC_VUI_MATRIX_COEFFS_SMPTE240M,
++        8 => M::NV_ENC_VUI_MATRIX_COEFFS_YCGCO,
++        9 => M::NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL,
++        10 => M::NV_ENC_VUI_MATRIX_COEFFS_BT2020_CL,
++        11 => M::NV_ENC_VUI_MATRIX_COEFFS_SMPTE2085,
+         other => {
+             tracing::warn!(
+-                value = other,
+-                "PUNKTFUNK_VUI_MATRIX: unrecognised matrix name — leaving the derived value"
++                cicp = other,
++                "PUNKTFUNK_VUI_MATRIX: no NVENC variant for this code point — leaving the derived value"
+             );
+             return None;
+         }
+@@ -710,23 +705,7 @@ fn parse_vui_matrix(raw: &str) -> Option<nv::NV_ENC_VUI_MATRIX_COEFFS> {
+ /// not perform also picked a swing we did not choose, and a stream that computes full but declares
+ /// limited gets expanded a second time by the decoder.
+ fn vui_full_range_override() -> Option<u32> {
+-    parse_vui_full_range(&std::env::var("PUNKTFUNK_VUI_FULL_RANGE").ok()?)
+-}
+-
+-/// The value→flag mapping behind [`vui_full_range_override`]; split out for the same reason as
+-/// [`parse_vui_matrix`].
+-fn parse_vui_full_range(raw: &str) -> Option<u32> {
+-    match raw.trim().to_ascii_lowercase().as_str() {
+-        "1" | "full" => Some(1),
+-        "0" | "limited" | "studio" => Some(0),
+-        other => {
+-            tracing::warn!(
+-                value = other,
+-                "PUNKTFUNK_VUI_FULL_RANGE: expected 0/1 (limited/full) — leaving the derived value"
+-            );
+-            None
+-        }
+-    }
++    pf_host_config::vui_full_range_override().map(u32::from)
+ }
+ 
+ /// The per-session knobs both direct-NVENC backends feed [`apply_low_latency_config`]. `Copy` so the
+diff --git a/crates/pf-host-config/src/lib.rs b/crates/pf-host-config/src/lib.rs
+index a74ff9e3..998b5088 100644
+--- a/crates/pf-host-config/src/lib.rs
++++ b/crates/pf-host-config/src/lib.rs
+@@ -57,6 +57,54 @@ pub fn env_on(name: &str) -> Option<bool> {
+     })
+ }
+ 
++/// `PUNKTFUNK_VUI_MATRIX` — the matrix-coefficients CICP code point a session declares, as a raw
++/// H.273 value. `None` (unset, or a name we do not recognise) keeps whatever the caller derived.
++///
++/// Lives here, in a crate BOTH the encoder and the host handshake depend on, because a session
++/// describes its colour twice — once in the bitstream VUI, once in the punktfunk/1 `ColorInfo` —
++/// and the two describe the same conversion. Clients read one or the other: the webOS/LG client
++/// hands `ColorInfo.matrix` straight to `NDL_DirectVideoSetHDRInfo` and never parses the VUI. A
++/// knob that moved only one of them would fix the picture on some clients and not others.
++pub fn vui_matrix_override() -> Option<u8> {
++    parse_cicp_matrix(&std::env::var("PUNKTFUNK_VUI_MATRIX").ok()?)
++}
++
++/// The name→H.273 code point mapping behind [`vui_matrix_override`], split out for testability:
++/// env vars are process-global, so a test that set one would race the parallel suite.
++pub fn parse_cicp_matrix(raw: &str) -> Option<u8> {
++    Some(match raw.trim().to_ascii_lowercase().as_str() {
++        "rgb" | "gbr" => 0,
++        "bt709" | "709" => 1,
++        "unspecified" => 2,
++        "fcc" => 4,
++        // The 601 pair: one matrix (Kr .299 / Kb .114) under two code points.
++        "bt470bg" | "bt601" | "601" => 5,
++        "smpte170m" | "170m" => 6,
++        "smpte240m" | "240m" => 7,
++        "ycgco" => 8,
++        "bt2020ncl" | "bt2020_ncl" | "2020ncl" => 9,
++        "bt2020cl" | "bt2020_cl" | "2020cl" => 10,
++        "smpte2085" => 11,
++        _ => return None,
++    })
++}
++
++/// `PUNKTFUNK_VUI_FULL_RANGE` — the declared swing (`1` full/PC, `0` limited/studio). `None` keeps
++/// the caller's derived value. Companion to [`vui_matrix_override`], applied in the same two
++/// places for the same reason.
++pub fn vui_full_range_override() -> Option<u8> {
++    match std::env::var("PUNKTFUNK_VUI_FULL_RANGE")
++        .ok()?
++        .trim()
++        .to_ascii_lowercase()
++        .as_str()
++    {
++        "1" | "full" => Some(1),
++        "0" | "limited" | "studio" => Some(0),
++        _ => None,
++    }
++}
++
+ /// Where desktop audio should be audible — which decides the render endpoint the loopback captures.
+ ///
+ /// Supersedes the two env-only knobs that used to encode this (`PUNKTFUNK_HOST_AUDIO`,
+diff --git a/crates/punktfunk-host/src/native/handshake.rs b/crates/punktfunk-host/src/native/handshake.rs
+index 18a76d5d..da08c0d8 100644
+--- a/crates/punktfunk-host/src/native/handshake.rs
++++ b/crates/punktfunk-host/src/native/handshake.rs
+@@ -574,10 +574,25 @@ pub(super) async fn negotiate(
+         // 10-bit capture format); 8-bit stays BT.709 SDR. The mastering metadata (ST.2086 +
+         // CLL) rides the 0xCE datagram below. (A future step can refine this to the capturer's
+         // actual monitor HDR state and announce a mid-stream flip.)
+-        color: if bit_depth >= 10 {
+-            ColorInfo::HDR10_BT2020_PQ
+-        } else {
+-            ColorInfo::SDR_BT709
++        //
++        // The `PUNKTFUNK_VUI_*` overrides apply here as well as to the bitstream VUI, and must:
++        // this field and that one describe the SAME conversion, and clients read one or the
++        // other. The webOS/LG client configures the panel from `ColorInfo.matrix`
++        // (`NDL_DirectVideoSetHDRInfo`) and never parses the VUI, so an override that moved only
++        // the VUI would leave that client — and its picture — exactly as it was.
++        color: {
++            let mut c = if bit_depth >= 10 {
++                ColorInfo::HDR10_BT2020_PQ
++            } else {
++                ColorInfo::SDR_BT709
++            };
++            if let Some(m) = pf_host_config::vui_matrix_override() {
++                c.matrix = m;
++            }
++            if let Some(fr) = pf_host_config::vui_full_range_override() {
++                c.full_range = fr;
++            }
++            c
+         },
+         // The chroma the encoder will actually emit (resolved + GPU-probed above) — 4:4:4 only
+         // when every gate passed, else 4:2:0. The client sizes its decoder from this.
+-- 
+2.55.0
+

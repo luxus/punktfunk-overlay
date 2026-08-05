@@ -1,0 +1,54 @@
+From ea39fc1eb4cb74035d6fd3f6160799a0de1fedde Mon Sep 17 00:00:00 2001
+From: luxus <7449+luxus@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 16:28:45 +0200
+Subject: [PATCH 8/8] fix(nix): put system profile on host service PATH for
+ steam
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Dedicated gamescope runs `exec steam -gamepadui …`. The user unit PATH
+was only bash/coreutils/pipewire(+gamescope), so steam (programs.steam
+→ /run/current-system/sw/bin) was missing: primary child exits, gamescope
+dies, no frames. Same class of bug as polaris empty labwc without steam
+on PATH. Include config.system.path and common FHS helpers.
+---
+ packaging/nix/nixos-module.nix | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/packaging/nix/nixos-module.nix b/packaging/nix/nixos-module.nix
+index d3c758c8..302ef7dd 100644
+--- a/packaging/nix/nixos-module.nix
++++ b/packaging/nix/nixos-module.nix
+@@ -369,12 +369,25 @@ in
+         wantedBy =
+           optional cfg.host.autoStart "default.target"
+           ++ optional cfg.host.bindToGraphicalSession "graphical-session.target";
+-        # The host may exec external helpers (pw-dump, sh, and — for the gamescope/kwin backends —
+-        # the compositor). Extend this in your config for a headless gamescope/KWin appliance.
++        # Nested launches (steam, gamescope app, kscreen-doctor, …) resolve via PATH. bash +
++        # coreutils + pipewire alone is NOT enough: a dedicated gamescope does
++        # `exec steam -gamepadui …` and dies with `exec: steam: not found` when steam only lives
++        # under /run/current-system/sw (programs.steam) — same class of bug as polaris empty
++        # labwc when PATH lacked steam. `config.system.path` + common helpers steam's FHS needs.
+         path = [
+-          pkgs.bash
++          config.system.path
++          pkgs.bashInteractive
+           pkgs.coreutils
++          pkgs.findutils
++          pkgs.gnugrep
++          pkgs.gnused
++          pkgs.gawk
++          pkgs.systemd
+           pkgs.pipewire
++          pkgs.procps
++          pkgs.util-linux
++          pkgs.which
++          pkgs.bubblewrap
+         ]
+         # The HDR-capable gamescope, if enabled. On PATH rather than pinned through
+         # PUNKTFUNK_GAMESCOPE_BIN so an operator's own override of that env still wins.
+-- 
+2.55.0
+

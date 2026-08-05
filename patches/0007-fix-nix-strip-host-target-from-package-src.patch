@@ -1,0 +1,97 @@
+From e0e58f5f7bab1fe0df91f97d8710b18b57e1e79e Mon Sep 17 00:00:00 2001
+From: luxus <7449+luxus@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 15:44:22 +0200
+Subject: [PATCH 7/8] fix(nix): strip host target/ from package src
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Path flake snapshots of a dirty tree can ship a pre-existing cargo
+target/ into the build sandbox. Cargo then tries to run host
+build-scripts (fec-rs) whose paths/libs are gone, failing with
+"could not execute process …/build-script-build (never executed)".
+
+Filter target/result/node_modules out of the shared package source.
+---
+ packaging/nix/packages.nix | 34 +++++++++++++++++++++++++++++-----
+ 1 file changed, 29 insertions(+), 5 deletions(-)
+
+diff --git a/packaging/nix/packages.nix b/packaging/nix/packages.nix
+index a5acdbdd..bf2f12f2 100644
+--- a/packaging/nix/packages.nix
++++ b/packaging/nix/packages.nix
+@@ -72,10 +72,32 @@ let
+   # `--version` / mgmt /health), mirroring the deb/rpm `~ci`-style stamp.
+   buildVersion = "${version}-nix";
+ 
++  # Path flake inputs can snapshot a dirty working tree (including host `target/`, `result`,
++  # `node_modules`). A pre-existing `target/` inside $src poisons cargo in the sandbox: it reuses
++  # host fingerprints/build-scripts whose interpreters/libs are missing, and you get
++  # `could not execute process …/build-script-build (never executed): No such file or directory`
++  # (seen on punktfunk-tray → fec-rs). Filter those out while keeping packaging/scripts/web/sdk.
++  cleanSrc = lib.cleanSourceWith {
++    name = "punktfunk-src";
++    src = src;
++    filter =
++      path: type:
++      let
++        base = baseNameOf path;
++      in
++      lib.cleanSourceFilter path type
++      && base != "target"
++      && base != "result"
++      && base != "node_modules"
++      && !(lib.hasPrefix "result-" base)
++      && !(lib.hasPrefix "cargoBuildLog" base);
++  };
++
+   # `cargo build --release --locked` scoped to the crates each package ships. crane appends this to
+   # both the vendor step and the compile.
+   commonArgs = {
+-    inherit src version;
++    src = cleanSrc;
++    inherit version;
+     strictDeps = true;
+ 
+     # nixpkgs ships CMake ≥ 4, which errors on `cmake_minimum_required(VERSION <3.5)`. Several
+@@ -295,7 +317,8 @@ in
+   # systemd `--user` units + firewall wiring live in the NixOS module, pointed at this store path.
+   punktfunk-web = stdenvNoCC.mkDerivation {
+     pname = "punktfunk-web";
+-    inherit src version;
++    src = cleanSrc;
++    inherit version;
+     # nodejs: `bun run codegen` ends in a literal `node tools/check-i18n.mjs`, so `node` must be on
+     # PATH. (The JS CLIs' own `#!/usr/bin/env node` shebangs are already rewritten inside the
+     # bun2nix cache.) bun is the RUNTIME — the launcher execs it; node is build-time only.
+@@ -313,7 +336,7 @@ in
+     # the same anonymous pull CI's rpm/deb builds do). That replaces the old single fixed-output
+     # `bun install` derivation whose aggregate `outputHash` had to be hand-bumped on every lockfile
+     # change — the failure mode this design removes.
+-    bunDeps = bun2nix.fetchBunDeps { bunNix = src + "/web/bun.nix"; };
++    bunDeps = bun2nix.fetchBunDeps { bunNix = cleanSrc + "/web/bun.nix"; };
+     # `src` is the whole repo; the console (and its lockfile) live in web/.
+     bunRoot = "web";
+     # The install-time `prepare` codegen is run explicitly in buildPhase instead (below), matching
+@@ -396,7 +419,8 @@ in
+   # self-contained JS, effect inlined) but the launcher execs `pkgs.bun` from the store.
+   punktfunk-scripting = stdenvNoCC.mkDerivation {
+     pname = "punktfunk-scripting";
+-    inherit src version;
++    src = cleanSrc;
++    inherit version;
+     nativeBuildInputs = [
+       bun
+       makeWrapper
+@@ -407,7 +431,7 @@ in
+     # step by the `bun2nix` devDependency's `prepare` script — `prepare`, not `postinstall`,
+     # because sdk/ is the PUBLISHED @punktfunk/host package and a postinstall would then run on
+     # every consumer's install). No aggregate deps hash to bump.
+-    bunDeps = bun2nix.fetchBunDeps { bunNix = src + "/sdk/bun.nix"; };
++    bunDeps = bun2nix.fetchBunDeps { bunNix = cleanSrc + "/sdk/bun.nix"; };
+     bunRoot = "sdk";
+     dontRunLifecycleScripts = true; # matches the deb/rpm/windows SDK builds' `--ignore-scripts`
+     dontUseBunBuild = true;
+-- 
+2.55.0
+

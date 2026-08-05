@@ -1,0 +1,125 @@
+From 505ff2489dfe38a27490e033aee05189c856f054 Mon Sep 17 00:00:00 2001
+From: Volodymyr Kravchenko <volandevo@gmail.com>
+Date: Tue, 4 Aug 2026 03:56:34 +0300
+Subject: [PATCH 5/8] fix(capture/hdr): offer the 10-bit channel order
+ producers actually deliver
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+HDR sessions arrived uniformly blue-shifted on an LG panel, through every colour
+label tried: BT.709, BT.601 and BT.2020 NCL, in both the bitstream VUI and the
+handshake ColorInfo, each confirmed applied in the log. A tint that survives
+every label is not a signalling bug — no colour description moves a channel.
+
+Red and blue were transposed. The HDR path offered xRGB_210LE then xBGR_210LE,
+PipeWire intersects in offer order, and the gamescope patch here offered both;
+so the pair agreed on xRGB while the composite came back BGR-ordered. Only
+XBGR2101010/ABGR2101010 exist for these formats on NVIDIA
+(ValveSoftware/gamescope#1029), so that texture could never have been RGB-ordered
+— the negotiation succeeded and meant nothing.
+
+Two halves, matching:
+
+- the gamescope patch stops offering the RGB-ordered twin. Upstream's own version
+  of this work (ValveSoftware/gamescope#2270, still a draft) offers xBGR alone,
+  for the same reason; ours added xRGB on top, which is where this came from.
+- the capture offers xBGR first. xRGB stays available for producers that really
+  do deliver it — Mutter's HDR screencast advertises it — just no longer ahead of
+  the order that works.
+
+Replaces the PUNKTFUNK_HDR_RGB_ORDER knob from the previous commit, which existed
+to tell a transposition from a mislabel and has now answered that.
+
+Verified on the glass, 3840x2160 HDR10 into an LG panel: negotiates xBGR_210LE,
+zero-copy dmabuf straight to CUDA, colours correct.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ crates/pf-capture/src/linux/pipewire.rs       | 33 ++++++++-----------
+ ...0-bit-BT.2020-PQ-capture-formats-HDR.patch | 13 ++++++--
+ 2 files changed, 24 insertions(+), 22 deletions(-)
+
+diff --git a/crates/pf-capture/src/linux/pipewire.rs b/crates/pf-capture/src/linux/pipewire.rs
+index d844f8cb..122a9f84 100644
+--- a/crates/pf-capture/src/linux/pipewire.rs
++++ b/crates/pf-capture/src/linux/pipewire.rs
+@@ -1361,30 +1361,25 @@ pub fn pipewire_thread(
+     // SDR alongside would make the producer pick its earlier-listed SDR format, and the
+     // negotiation-timeout path latches the process-wide SDR downgrade if nothing matches.
+     let format_pods: Vec<Vec<u8>> = if want_hdr {
+-        // The producer takes the first pod it can satisfy, so this order decides the channel
+-        // order we then hand to the encoder. `PUNKTFUNK_HDR_RGB_ORDER=bgr` puts xBGR first.
++        // xBGR is offered FIRST, and the order matters: PipeWire intersects in offer order, so
++        // whichever of the two a producer can satisfy first is the channel order the encoder
++        // then receives.
+         //
+-        // That knob is a swap TEST, not a preference: if a producer's 10-bit PQ buffers carry
+-        // BGR while it accepts the xRGB pod, red and blue arrive transposed and the picture is
+-        // uniformly blue-shifted — through every matrix, since no colour label can move a
+-        // channel. Flipping the offer is the cheapest way to tell that apart from a signalling
+-        // bug, which relabelling would have fixed.
+-        let bgr_first = std::env::var("PUNKTFUNK_HDR_RGB_ORDER")
+-            .map(|v| v.trim().eq_ignore_ascii_case("bgr"))
+-            .unwrap_or(false);
+-        let (first, second) = if bgr_first {
+-            (VideoFormat::xBGR_210LE, VideoFormat::xRGB_210LE)
+-        } else {
+-            (VideoFormat::xRGB_210LE, VideoFormat::xBGR_210LE)
+-        };
++        // A producer whose 10-bit PQ composite lands BGR-ordered while it accepts the xRGB pod
++        // negotiates happily and transposes red and blue — a uniformly blue-shifted stream that
++        // no colour signalling can correct, because none of it moves a channel. gamescope on
++        // NVIDIA is exactly that case: only XBGR2101010/ABGR2101010 exist for these there
++        // (ValveSoftware/gamescope#1029), so the texture cannot come back RGB-ordered.
++        //
++        // xRGB stays in the offer for producers that genuinely deliver it — Mutter's HDR
++        // screencast advertises it — just no longer ahead of the order that actually works.
+         tracing::info!(
+-            bgr_first,
+-            "HDR capture: offering xRGB_210LE/xBGR_210LE LINEAR dmabufs with MANDATORY \
++            "HDR capture: offering xBGR_210LE/xRGB_210LE LINEAR dmabufs with MANDATORY \
+              BT.2020 + SMPTE-2084 (PQ) colorimetry (GNOME 50+ monitor stream)"
+         );
+         vec![
+-            build_hdr_dmabuf_format(first, preferred)?,
+-            build_hdr_dmabuf_format(second, preferred)?,
++            build_hdr_dmabuf_format(VideoFormat::xBGR_210LE, preferred)?,
++            build_hdr_dmabuf_format(VideoFormat::xRGB_210LE, preferred)?,
+         ]
+     } else if want_dmabuf {
+         let mut pods = Vec::with_capacity(if prefer_native_nv12 { 2 } else { 1 });
+diff --git a/packaging/gamescope/patches/0001-pipewire-offer-10-bit-BT.2020-PQ-capture-formats-HDR.patch b/packaging/gamescope/patches/0001-pipewire-offer-10-bit-BT.2020-PQ-capture-formats-HDR.patch
+index 81708ccc..1b996f6d 100644
+--- a/packaging/gamescope/patches/0001-pipewire-offer-10-bit-BT.2020-PQ-capture-formats-HDR.patch
++++ b/packaging/gamescope/patches/0001-pipewire-offer-10-bit-BT.2020-PQ-capture-formats-HDR.patch
+@@ -159,7 +159,7 @@ index 76b3ea8..6b56b01 100644
+  	params.push_back((const struct spa_pod *) spa_pod_builder_pop(builder, &obj_frame));
+  
+  //	for (auto& param : params)
+-@@ -166,6 +209,14 @@ static std::vector<const struct spa_pod *> build_format_params(struct spa_pod_bu
++@@ -166,6 +209,21 @@ static std::vector<const struct spa_pod *> build_format_params(struct spa_pod_bu
+  
+  	build_format_params(builder, SPA_VIDEO_FORMAT_BGRx, params);
+  	build_format_params(builder, SPA_VIDEO_FORMAT_NV12, params);
+@@ -167,8 +167,15 @@ index 76b3ea8..6b56b01 100644
+ +	// Listed LAST, on purpose: PipeWire intersects in offer order, so every consumer that
+ +	// negotiates today's 8-bit stream keeps negotiating it bit-for-bit. Only a consumer that
+ +	// asks for a 10-bit format by name — and accepts the MANDATORY BT.2020 + PQ colorimetry
+-+	// above — ever reaches these.
+-+	build_format_params(builder, SPA_VIDEO_FORMAT_xRGB_210LE, params);
+++	// above — ever reaches this.
+++	//
+++	// xBGR ONLY, deliberately. The RGB-ordered twin was offered here too and is the one a
+++	// consumer picks first, but the composite lands BGR-ordered regardless — NVIDIA exposes
+++	// only XBGR2101010/ABGR2101010 for these (ValveSoftware/gamescope#1029), so the texture
+++	// cannot come back the other way round. Offering it produced a negotiation that succeeds
+++	// and transposes red and blue: a uniformly blue-shifted stream that no colour signalling
+++	// can correct, since none of it moves a channel. Upstream's own take on this
+++	// (ValveSoftware/gamescope#2270) offers xBGR alone for the same reason.
+ +	build_format_params(builder, SPA_VIDEO_FORMAT_xBGR_210LE, params);
+ +#endif
+  
+-- 
+2.55.0
+

@@ -1,0 +1,70 @@
+From 1d41e48df8553a63448b6992c102f3a1c0ba1d64 Mon Sep 17 00:00:00 2001
+From: Volodymyr Kravchenko <volandevo@gmail.com>
+Date: Tue, 4 Aug 2026 03:41:11 +0300
+Subject: [PATCH 4/8] test(capture/hdr): knob to flip the 10-bit PQ channel
+ order offered to the producer
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Relabelling the matrix — BT.709, BT.601, BT.2020 NCL, in both the bitstream VUI
+and the handshake ColorInfo — leaves the picture identically blue-shifted on an
+LG panel. No colour label can move a channel, so a tint that survives every
+label is evidence the channels themselves are transposed, not mis-described.
+
+The HDR path offers xRGB_210LE then xBGR_210LE and the producer takes the first
+it can satisfy. If its buffers carry BGR while it accepts the xRGB pod, red and
+blue reach the encoder swapped and every downstream label is irrelevant.
+
+PUNKTFUNK_HDR_RGB_ORDER=bgr puts xBGR first, which is the cheapest way to tell
+the two apart on the glass. Unset keeps today's order exactly.
+
+Deliberately a test knob and named like one: if the flip is what fixes the
+picture, the fix belongs wherever the mislabel actually is, not in a preference
+an operator has to know to set.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ crates/pf-capture/src/linux/pipewire.rs | 21 +++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/crates/pf-capture/src/linux/pipewire.rs b/crates/pf-capture/src/linux/pipewire.rs
+index 37b17757..d844f8cb 100644
+--- a/crates/pf-capture/src/linux/pipewire.rs
++++ b/crates/pf-capture/src/linux/pipewire.rs
+@@ -1361,13 +1361,30 @@ pub fn pipewire_thread(
+     // SDR alongside would make the producer pick its earlier-listed SDR format, and the
+     // negotiation-timeout path latches the process-wide SDR downgrade if nothing matches.
+     let format_pods: Vec<Vec<u8>> = if want_hdr {
++        // The producer takes the first pod it can satisfy, so this order decides the channel
++        // order we then hand to the encoder. `PUNKTFUNK_HDR_RGB_ORDER=bgr` puts xBGR first.
++        //
++        // That knob is a swap TEST, not a preference: if a producer's 10-bit PQ buffers carry
++        // BGR while it accepts the xRGB pod, red and blue arrive transposed and the picture is
++        // uniformly blue-shifted — through every matrix, since no colour label can move a
++        // channel. Flipping the offer is the cheapest way to tell that apart from a signalling
++        // bug, which relabelling would have fixed.
++        let bgr_first = std::env::var("PUNKTFUNK_HDR_RGB_ORDER")
++            .map(|v| v.trim().eq_ignore_ascii_case("bgr"))
++            .unwrap_or(false);
++        let (first, second) = if bgr_first {
++            (VideoFormat::xBGR_210LE, VideoFormat::xRGB_210LE)
++        } else {
++            (VideoFormat::xRGB_210LE, VideoFormat::xBGR_210LE)
++        };
+         tracing::info!(
++            bgr_first,
+             "HDR capture: offering xRGB_210LE/xBGR_210LE LINEAR dmabufs with MANDATORY \
+              BT.2020 + SMPTE-2084 (PQ) colorimetry (GNOME 50+ monitor stream)"
+         );
+         vec![
+-            build_hdr_dmabuf_format(VideoFormat::xRGB_210LE, preferred)?,
+-            build_hdr_dmabuf_format(VideoFormat::xBGR_210LE, preferred)?,
++            build_hdr_dmabuf_format(first, preferred)?,
++            build_hdr_dmabuf_format(second, preferred)?,
+         ]
+     } else if want_dmabuf {
+         let mut pods = Vec::with_capacity(if prefer_native_nv12 { 2 } else { 1 });
+-- 
+2.55.0
+
