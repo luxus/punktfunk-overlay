@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check-patch-meta
+        run: ./scripts/check-patch-meta.sh
+      - name: check-gamescope-prs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/check-gamescope-prs.sh
+
+  # Full host build is heavy; keep flake eval + meta on every PR.
+  # Dispatch or main can extend with nix build later.
+  flake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - name: flake show
+        run: nix flake show --all-systems 2>/dev/null || nix flake show

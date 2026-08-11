@@ -1,0 +1,107 @@
+# Registry of every applied patch. See AGENTS.md and scripts/check-patch-meta.sh.
+# Archive entries are documentation only (not applied).
+
+[[patch]]
+file = "gamescope-patches/0001-pipewire-offer-10-bit-BT.2020-PQ-capture-formats-HDR.patch"
+tier = "gamescope"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/3"
+summary = "HDR SPA formats for PipeWire capture (PF gamescope)"
+upstream_disposition = "gamescope-pr"
+gamescope_prs = [
+  "https://github.com/ValveSoftware/gamescope/pull/2270",
+]
+punktfunk_prs = []
+
+[[patch]]
+file = "gamescope-patches/0002-pipewire-optionally-composite-the-cursor-into-the-ca.patch"
+tier = "gamescope"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/3"
+summary = "Optional cursor composite into PipeWire capture"
+upstream_disposition = "gamescope-pr"
+gamescope_prs = []
+punktfunk_prs = []
+
+[[patch]]
+file = "gamescope-patches/0003-punktfunk-stamp-the-version-banner-with-pfhdrN.patch"
+tier = "gamescope"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/3"
+summary = "+pfhdrN version stamp for capability probe"
+upstream_disposition = "none"
+gamescope_prs = []
+punktfunk_prs = []
+
+# --- archive (not applied; story only) ---
+
+[[patch]]
+file = "patches/archive/0001-fix-nix-regenerate-web-bun.nix-stop-gamescope.nix-de.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/5"
+summary = "Retired: bun.nix/gamescope packaging fix — re-check unom before revive"
+upstream_disposition = "none"
+
+[[patch]]
+file = "patches/archive/0002-feat-encode-nvenc-name-who-did-the-RGB-YUV-conversio.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/5"
+summary = "Retired: NVENC VUI colour diagnostics (not encode latency)"
+upstream_disposition = "none"
+
+[[patch]]
+file = "patches/archive/0003-fix-host-colour-apply-the-colour-override-to-the-han.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/5"
+summary = "Retired: colour override on handshake"
+upstream_disposition = "none"
+
+[[patch]]
+file = "patches/archive/0004-test-capture-hdr-knob-to-flip-the-10-bit-PQ-channel-.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/5"
+summary = "Retired: superseded by 0005"
+upstream_disposition = "none"
+
+[[patch]]
+file = "patches/archive/0005-fix-capture-hdr-offer-the-10-bit-channel-order-produ.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/5"
+summary = "Retired from default: xBGR-first HDR colour — revive as experimental only with proof"
+upstream_disposition = "none"
+
+[[patch]]
+file = "patches/archive/0006-fix-vdisplay-detect-NixOS-wrapped-compositors-via-pr.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/2"
+summary = "Retired: early NixOS wrap detect + bindToGraphicalSession (see archive 0010 / unom #158)"
+upstream_disposition = "unom-pr"
+
+[[patch]]
+file = "patches/archive/0010-fix-vdisplay-detect-NixOS-wrapped-compositors.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/2"
+summary = "Retired: upstream unom #158 + #161 (0.27) detect NixOS-wrapped/capped compositors"
+upstream_disposition = "unom-pr"
+punktfunk_prs = [
+  "https://git.unom.io/unom/punktfunk/pulls/158",
+  "https://git.unom.io/unom/punktfunk/pulls/161",
+]
+
+[[patch]]
+file = "patches/archive/0007-fix-nix-strip-host-target-from-package-src.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/5"
+summary = "Retired: target/ strip for dirty path flakes only"
+upstream_disposition = "none"
+
+[[patch]]
+file = "patches/archive/0008-fix-nix-put-system-profile-on-host-service-PATH-for-.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/4"
+summary = "Superseded by modules/session.nix PATH"
+upstream_disposition = "unom-pr"
+
+[[patch]]
+file = "patches/archive/0009-feat-nix-gamescope-track-Valve-master-2271-is-upstr.patch"
+tier = "archive"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/3"
+summary = "Superseded by packages/gamescope.nix"
+upstream_disposition = "none"

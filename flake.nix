@@ -1,5 +1,5 @@
 {
-  description = "NixOS overlay/patches for unom/punktfunk — stay on upstream, carry local fixes";
+  description = "NixOS overlay for unom/punktfunk — unom main + deliberate deltas";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -12,7 +12,7 @@
       url = "github:nix-community/bun2nix?ref=2.1.2";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # Upstream source. Bump: nix flake update punktfunk-src
+    # Bump: nix flake update punktfunk-src
     punktfunk-src = {
       url = "git+https://git.unom.io/unom/punktfunk";
       flake = false;
@@ -31,19 +31,19 @@
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      lib = nixpkgs.lib;
 
-      # Ordered patch series (git format-patch against unom/main).
-      overlayPatches = [
-        ./patches/0001-fix-nix-regenerate-web-bun.nix-stop-gamescope.nix-de.patch
-        ./patches/0002-feat-encode-nvenc-name-who-did-the-RGB-YUV-conversio.patch
-        ./patches/0003-fix-host-colour-apply-the-colour-override-to-the-han.patch
-        ./patches/0004-test-capture-hdr-knob-to-flip-the-10-bit-PQ-channel-.patch
-        ./patches/0005-fix-capture-hdr-offer-the-10-bit-channel-order-produ.patch
-        ./patches/0006-fix-vdisplay-detect-NixOS-wrapped-compositors-via-pr.patch
-        ./patches/0007-fix-nix-strip-host-target-from-package-src.patch
-        ./patches/0008-fix-nix-put-system-profile-on-host-service-PATH-for-.patch
-        ./patches/0009-feat-nix-gamescope-track-Valve-master-2271-is-upstr.patch
-      ];
+      listPatches =
+        dir:
+        let
+          entries = builtins.readDir dir;
+          names = builtins.attrNames entries;
+          patches = builtins.filter (n: lib.hasSuffix ".patch" n) names;
+        in
+        map (n: dir + "/${n}") (lib.sort (a: b: a < b) patches);
+
+      requiredPatches = listPatches ./patches/required;
+      experimentalPatches = listPatches ./patches/experimental;
 
       pkgsFor =
         system:
@@ -52,45 +52,58 @@
           overlays = [ (import rust-overlay) ];
         };
 
-      toolchainFor =
-        pkgs: pkgs.rust-bin.fromRustupToolchainFile (punktfunk-src + "/rust-toolchain.toml");
+      toolchainFor = pkgs: pkgs.rust-bin.fromRustupToolchainFile (punktfunk-src + "/rust-toolchain.toml");
       craneLibFor = pkgs: (crane.mkLib pkgs).overrideToolchain toolchainFor;
 
       version =
         (builtins.fromTOML (builtins.readFile (punktfunk-src + "/Cargo.toml"))).workspace.package.version;
 
+      mkPackages =
+        system: extraPatches: srcName:
+        let
+          pkgs = pkgsFor system;
+          src = pkgs.applyPatches {
+            name = srcName;
+            src = punktfunk-src;
+            patches = requiredPatches ++ extraPatches;
+          };
+          pf = pkgs.callPackage (src + "/packaging/nix/packages.nix") {
+            craneLib = craneLibFor pkgs;
+            inherit src version;
+            bun2nix = bun2nix.packages.${system}.default;
+          };
+        in
+        pf;
+
       packagesFor =
         system:
         let
           pkgs = pkgsFor system;
-          patchedSrc = pkgs.applyPatches {
-            name = "punktfunk-src-patched";
-            src = punktfunk-src;
-            patches = overlayPatches;
+          baseline = mkPackages system [ ] "punktfunk-src-baseline";
+          experimental =
+            if experimentalPatches == [ ] then
+              baseline
+            else
+              mkPackages system experimentalPatches "punktfunk-src-experimental";
+          gamescope = pkgs.callPackage ./packages/gamescope.nix {
+            patchDir = ./gamescope-patches;
           };
-          # packaging/*.nix after patches (includes packages.nix src clean + gamescope.nix fix)
-          pf = pkgs.callPackage (patchedSrc + "/packaging/nix/packages.nix") {
-            craneLib = craneLibFor pkgs;
-            src = patchedSrc;
-            inherit version;
-            bun2nix = bun2nix.packages.${system}.default;
-          };
-          gamescope = pkgs.callPackage (patchedSrc + "/packaging/nix/gamescope.nix") {
-            patchDir = patchedSrc + "/packaging/gamescope/patches";
-          };
+          withExpAliases = lib.mapAttrs' (name: value: {
+            name = "${name}-experimental";
+            value = experimental.${name};
+          }) experimental;
         in
-        pf
+        baseline
+        // withExpAliases
         // {
           punktfunk-gamescope = gamescope;
-          default = pf.punktfunk-host;
+          default = baseline.punktfunk-host;
         };
     in
     {
       packages = forAllSystems packagesFor;
 
-      # Vendored module (from patched tree) — no import-from-derivation on `imports`.
-      # Package defaults resolve via `self.packages.${system}` like upstream.
-      nixosModules.default = import ./modules/nixos-module.nix self;
+      nixosModules.default = import ./modules/default.nix self;
       nixosModules.punktfunk = self.nixosModules.default;
 
       checks = forAllSystems (system: {
@@ -98,5 +111,22 @@
       });
 
       formatter = forAllSystems (system: (pkgsFor system).nixfmt-rfc-style);
+
+      # Lightweight dev shell for meta scripts + formatting.
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [
+              pkgs.nixfmt-rfc-style
+              pkgs.gh
+              pkgs.git
+            ];
+          };
+        }
+      );
     };
 }

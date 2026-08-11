@@ -1,9 +1,10 @@
 # NixOS integration for punktfunk — the declarative equivalent of everything the RPM/deb do in
 # their %install + %post (packaging/rpm/punktfunk.spec, packaging/debian/build-deb.sh):
 # the systemd *user* service, the uinput/uhid/vhci udev rules, the vhci-hcd autoload, the 32 MB
-# UDP socket-buffer sysctls, the firewall openers, the `input`-group membership for virtual
-# gamepads, the management web console (`services.punktfunk.web`, on by default with the host — the
-# RPM/deb Recommends), and the opt-in plugin/script runner (`services.punktfunk.scripting`).
+# UDP socket-buffer sysctls, the firewall openers, the `input`- and `punktfunk`-group membership
+# for virtual gamepads, the management web console (`services.punktfunk.web`, on by default with
+# the host — the RPM/deb Recommends), and the plugin/script runner
+# (`services.punktfunk.scripting`, likewise on by default — the game-library scanners are plugins).
 #
 # Usage (flake):
 #   { inputs.punktfunk.url = "git+https://git.unom.io/unom/punktfunk";
@@ -106,21 +107,31 @@ in
         '';
       };
 
-      # Mirrors scripts/punktfunk-host-desktop-session.conf — see docs/running-as-a-service
-      # ("Restart the host with your desktop") and docs/kde for the interactive KDE path.
-      bindToGraphicalSession = mkOption {
+      desktopSession = mkOption {
         type = types.bool;
-        default = true;
+        default = false;
         description = ''
-          Bind the host unit to `graphical-session.target` (`After`/`PartOf`/`WantedBy`), so a
-          Plasma, kwin-noctalia, or GNOME restart restarts the host instead of leaving it holding
-          a dead Wayland socket and portal connection. This is the declarative form of
-          `punktfunk-host-desktop-session.conf`.
+          Bind the host to the DESKTOP LOGIN session's lifetime
+          (`PartOf=`/`WantedBy=graphical-session.target`), so a Plasma/GNOME restart restarts the
+          host with it.
 
-          Keep this on for a machine you log into. Set to `false` for a headless appliance that
-          never reaches `graphical-session.target` (pinned `PUNKTFUNK_COMPOSITOR`,
-          `punktfunk-kde-session`, or a gamescope-only box) — otherwise the unit can end up
-          permanently stopped after a partial session teardown.
+          Turn this on for a machine somebody logs into. Without it, when the compositor restarts
+          (a crash, a logout/login, "restart the shell") the host keeps running while holding a
+          Wayland socket and a portal D-Bus connection that both died with the old compositor. It
+          cannot recover either in-process, and the failure is silent: the host still listens,
+          still answers, and every session it then serves fails at capture. A host that idles for
+          days between sessions is exactly the shape that gets discovered at the worst moment.
+
+          Leave it OFF for an appliance — a pinned `PUNKTFUNK_COMPOSITOR`, a headless KWin or a
+          gamescope box. Those start their own compositor and may never reach
+          `graphical-session.target` at all, and this would leave the host permanently stopped.
+
+          No effect under sway/Hyprland or any session not managed by systemd (they never reach
+          that target either): there, start the host from the compositor's own config, after
+          `systemctl --user import-environment`, so it dies and comes back with the session.
+
+          This is the declarative equivalent of the `scripts/punktfunk-host-desktop-session.conf`
+          drop-in the deb/rpm document for the same route.
         '';
       };
 
@@ -129,9 +140,11 @@ in
         default = [ ];
         example = [ "alice" ];
         description = ''
-          Users to add to the `input` group — required for the virtual gamepads the host creates
-          (`/dev/uinput`, `/dev/uhid`, and the usbip/vhci virtual Steam Deck). The host runs as
-          these users' `systemd --user` service.
+          Users to add to the `input` and `punktfunk` groups — required for the virtual gamepads
+          the host creates: `input` covers `/dev/uinput` and `/dev/uhid`, `punktfunk` covers the
+          usbip/vhci nodes the virtual Steam Deck pad attaches through. The second is separate on
+          purpose — it can emulate arbitrary USB hardware, so only list users you would trust with
+          that. The host runs as these users' `systemd --user` service.
         '';
       };
 
@@ -252,7 +265,11 @@ in
         type = types.bool;
         default = cfg.host.openFirewall;
         defaultText = literalExpression "config.services.punktfunk.host.openFirewall";
-        description = "Open TCP 47992 so the console is reachable from other devices on the LAN.";
+        description = ''
+          Open TCP 47992 so the console is reachable from other devices on the LAN, and TCP 47993,
+          the separate origin its plugin UIs are served from (without it, plugin interfaces do not
+          load in the console).
+        '';
       };
 
       autoStart = mkOption {
@@ -268,9 +285,9 @@ in
     };
 
     # The plugin/script runner — host automation on bun. Ships with the host (the RPM/deb Recommends
-    # it), but running it is OPT-IN: the `systemd --user` unit is defined yet NOT added to
-    # `default.target`, because the runner is inert until you add scripts/plugins. Turn it on with
-    # `systemctl --user enable --now punktfunk-scripting`.
+    # it) and, like them, runs by default: the game-library scanners are plugins, so a host with the
+    # runner off has an empty library. Opt out with `scripting.autoStart = false` or, per user,
+    # `systemctl --user mask punktfunk-scripting`.
     scripting = {
       enable = mkOption {
         type = types.bool;
@@ -278,9 +295,10 @@ in
         defaultText = literalExpression "config.services.punktfunk.host.enable";
         description = ''
           Install the plugin/script runner and define its `systemd --user` unit
-          (`punktfunk-scripting`). Enabled by default whenever the host is — but the unit is not
-          auto-started (see `autoStart`), since the runner does nothing until you add scripts to
-          `~/.config/punktfunk/scripts` or install `punktfunk-plugin-*` packages under
+          (`punktfunk-scripting`). Enabled by default whenever the host is, and started by default
+          too (see `autoStart`) — the game-library scanners are plugins, so a host without the
+          runner has an empty library. It also runs whatever you put in
+          `~/.config/punktfunk/scripts` or install as `punktfunk-plugin-*` under
           `~/.config/punktfunk/plugins`. A plugin auto-wires to the host's mgmt token + identity cert.
         '';
       };
@@ -294,11 +312,21 @@ in
 
       autoStart = mkOption {
         type = types.bool;
-        default = false;
+        default = cfg.scripting.enable;
+        defaultText = literalExpression "config.services.punktfunk.scripting.enable";
         description = ''
           Start the runner automatically in every user's graphical session (adds it to the user
-          `default.target`). Off by default even when the host auto-starts — running arbitrary
-          operator scripts/plugins is a deliberate opt-in; enable it once you have automation to run.
+          `default.target`).
+
+          ON by default, matching every other channel: the deb postinst and the RPM `%post` both
+          run `systemctl --global enable punktfunk-scripting.service`, and the sysext image bakes
+          in the `default.target.wants` symlink. It used to be opt-in here, on the reasoning that
+          the runner does nothing until you add scripts or plugins — that stopped being true when
+          the game-library scanners became plugins. A host whose runner is off now comes up with an
+          empty library and no obvious reason why (design/library-scanner-plugins.md D9).
+
+          It remains opt-OUT: set this to `false`, or per user
+          `systemctl --user mask punktfunk-scripting`.
         '';
       };
     };
@@ -316,6 +344,23 @@ in
       # The GPU driver libs the binaries dlopen at runtime (libcuda / libnvidia-encode / libEGL /
       # the Vulkan ICD) live under /run/opengl-driver/lib — provided by hardware.graphics.
       hardware.graphics.enable = mkDefault true;
+
+      # A WARNING, not `xdg.portal.enable = mkDefault true`: enabling the portal service without an
+      # `extraPortals` backend is its own broken state, and only the operator knows which backend
+      # their compositor needs. The desktop-manager modules (plasma6, gnome) already wire theirs, so
+      # this fires exactly where it should — a headless/appliance or sway/Hyprland box assembled by
+      # hand. It matters because the host reaches the desktop through portals on several backends:
+      # Mutter's virtual output is ashpd ScreenCast/RemoteDesktop, and the libei input path's own
+      # error message is "is xdg-desktop-portal-kde/gnome running and XDG_CURRENT_DESKTOP set?".
+      warnings = optional (cfg.host.enable && !config.xdg.portal.enable) ''
+        services.punktfunk.host is enabled but xdg.portal.enable is false. The host drives the
+        compositor through xdg-desktop-portal on several backends (Mutter's ScreenCast/RemoteDesktop
+        and the libei input path), so capture or input will fail there with a portal error. Set
+        xdg.portal.enable = true and add the backend for your compositor, e.g.
+        xdg.portal.extraPortals = [ pkgs.xdg-desktop-portal-kde ]   # or -gnome / -hyprland / -wlr
+        (the KDE and GNOME desktop-manager modules already do this for you). The KWin backend's own
+        virtual output uses the privileged zkde_screencast protocol and needs no portal.
+      '';
       # 32 MB UDP socket buffers — without this the kernel clamps the host's SO_SNDBUF / client's
       # SO_RCVBUF and high-bitrate frames overflow (measured: 4 MB cap = 31.6 % loss at 2 Gbps).
       boot.kernel.sysctl = {
@@ -340,9 +385,22 @@ in
       ];
 
       # `input` group membership for the virtual-gamepad nodes (mirrors the RPM's usermod hint).
+      #
+      # `punktfunk` is the SECOND group 60-punktfunk.rules needs: it owns the usbip vhci
+      # attach/detach nodes, and is deliberately not `input` because writing `attach` materialises
+      # an arbitrary emulated USB device — a root-only kernel primitive that must not ride on the
+      # group every gamepad guide tells you to join (security-review 2026-08-05 M-4). Declaring the
+      # group is not optional: the rule shells out to `chgrp punktfunk`, which fails outright if
+      # nothing ever created it, leaving the nodes root-only and the virtual Steam Deck pad unable
+      # to attach. Membership follows `host.users`, which is already the explicit "these users run
+      # the host" list this option's description scopes to the usbip/vhci pad.
       users.groups.input = { };
+      users.groups.punktfunk = { };
       users.users = genAttrs cfg.host.users (_: {
-        extraGroups = [ "input" ];
+        extraGroups = [
+          "input"
+          "punktfunk"
+        ];
       });
 
       # Status-tray autostart entry (self-gating: `--autostart` exits unless this user runs a host).
@@ -354,45 +412,96 @@ in
         allowedUDPPorts = nativeUDP ++ optionals cfg.host.gamestream gamestreamUDP;
       };
 
+      # NO CAP_SYS_NICE wrapper for the HOST — deliberately, and note there is deliberately one for
+      # the WORKER just below; the difference is the whole point. 0.26.0-1 gave the host a
+      # `security.wrappers.punktfunk-host` carrying `cap_sys_nice=ep` for the GPU-priority lever,
+      # and that broke desktop streaming on every KDE box.
+      #
+      # KWin advertises its restricted Wayland protocols (zkde_screencast_unstable_v1 for the
+      # virtual output, org_kde_kwin_fake_input for input) only to a client it can IDENTIFY, by
+      # resolving that client's /proc/<pid>/exe and matching it against an installed .desktop's
+      # Exec= (packages.nix substitutes ours to the store path). The kernel refuses that readlink to
+      # any reader whose effective set is not a superset of the target's PERMITTED set
+      # (cap_ptrace_access_check), and KWin holds no capabilities.
+      #
+      # A NixOS wrapper does not dodge this. It raises the capability into its AMBIENT set before
+      # exec'ing the store binary, precisely so the capability survives — which lands CAP_SYS_NICE
+      # in the exec'd process's permitted set and fails the readlink identically. Measured: an
+      # ambient-only grant (dumpable=1, CapPrm set) is refused exactly like a file capability. See
+      # packaging/arch/punktfunk-host.install for the full matrix.
+      #
+      # The capability lives on the ENCODE WORKER instead — a different binary, and one nothing
+      # ever has to identify.
+      #
+      # punktfunk-encode-worker is spawned per PyroWave session, speaks one socketpair to its
+      # parent, and never connects to Wayland, D-Bus or the network. Nothing resolves ITS
+      # /proc/<pid>/exe, so the ambient grant a NixOS wrapper performs — the very thing that makes
+      # a wrapper useless for the host — is exactly right here. (It must also stay a SEPARATE file:
+      # a hardlink or a host subcommand would share the inode, hence the capability, and re-create
+      # the breakage above on every file-capability channel.)
+      #
+      # A file capability cannot live on a store path (read-only, and shared by every generation),
+      # so `security.wrappers` is the only mechanism NixOS has — which is why the unit below points
+      # PUNKTFUNK_ENCODE_WORKER at `config.security.wrapperDir` rather than the store path. The
+      # host's own ExecStart stays on the store path and must never move.
+      #
+      # Best-effort by construction: if the wrapper is absent or the operator overrides the env,
+      # the host falls back to its in-process encoder at default GPU priority — one warn, never a
+      # dead session. What the capability buys: PyroWave encodes on the GPU shader cores a game
+      # saturates, and every driver tested (NVIDIA and RADV) refuses EVERY elevated
+      # VK_KHR_global_priority class without CAP_SYS_NICE. Measured on an RTX 5070 Ti under load:
+      # encode p99 6.4 -> 4.4 ms.
+      #
+      # Narrow: CAP_SYS_NICE permits raising scheduling priority only — no filesystem, network or
+      # user-switching privilege, and the wrapper is capability-based, NOT setuid.
+      security.wrappers.punktfunk-encode-worker = {
+        source = "${cfg.host.package}/bin/punktfunk-encode-worker";
+        capabilities = "cap_sys_nice=ep";
+        owner = "root";
+        group = "root";
+      };
+
       systemd.user.services.punktfunk-host = {
         description = "punktfunk GameStream + punktfunk/1 streaming host";
         documentation = [ "https://git.unom.io/unom/punktfunk" ];
         # Soft ordering: the host listens immediately and only touches the compositor per session.
-        # When bindToGraphicalSession: also after/partOf GS so a desktop restart refreshes the
-        # Wayland + portal connections (scripts/punktfunk-host-desktop-session.conf).
-        after = [ "pipewire.service" ] ++ optional cfg.host.bindToGraphicalSession "graphical-session.target";
+        after = [ "pipewire.service" ] ++ optional cfg.host.desktopSession "graphical-session.target";
         wants = [ "pipewire.service" ];
-        partOf = optional cfg.host.bindToGraphicalSession "graphical-session.target";
-        # default.target: early listen at login (autoStart). graphical-session.target: re-pull on
-        # compositor restart when bindToGraphicalSession (in addition to default, same as the
-        # packaged drop-in's WantedBy).
+        # `graphical-session.target` is IN ADDITION to `default.target`, never instead of it: the
+        # host still comes up at login before the graphical session is ready — it listens without
+        # touching the compositor and only opens one per client connect, so an early start costs
+        # nothing. `partOf` is the half that matters, taking the host down with the session so the
+        # next one gets a fresh compositor connection (see `desktopSession`).
+        partOf = optional cfg.host.desktopSession "graphical-session.target";
         wantedBy =
           optional cfg.host.autoStart "default.target"
-          ++ optional cfg.host.bindToGraphicalSession "graphical-session.target";
-        # Nested launches (steam, gamescope app, kscreen-doctor, …) resolve via PATH. bash +
-        # coreutils + pipewire alone is NOT enough: a dedicated gamescope does
-        # `exec steam -gamepadui …` and dies with `exec: steam: not found` when steam only lives
-        # under /run/current-system/sw (programs.steam) — same class of bug as polaris empty
-        # labwc when PATH lacked steam. `config.system.path` + common helpers steam's FHS needs.
+          ++ optional cfg.host.desktopSession "graphical-session.target";
+        # The host may exec external helpers (pw-dump, sh, and — for the gamescope/kwin backends —
+        # the compositor). Extend this in your config for a headless gamescope/KWin appliance.
         path = [
-          config.system.path
-          pkgs.bashInteractive
+          pkgs.bash
           pkgs.coreutils
-          pkgs.findutils
-          pkgs.gnugrep
-          pkgs.gnused
-          pkgs.gawk
-          pkgs.systemd
           pkgs.pipewire
-          pkgs.procps
-          pkgs.util-linux
-          pkgs.which
-          pkgs.bubblewrap
         ]
         # The HDR-capable gamescope, if enabled. On PATH rather than pinned through
         # PUNKTFUNK_GAMESCOPE_BIN so an operator's own override of that env still wins.
         ++ optional cfg.host.gamescopeHdr cfg.host.gamescopePackage;
+        # Point the host at the WRAPPED encode worker (see `security.wrappers` above). The host's
+        # own resolution order is PUNKTFUNK_ENCODE_WORKER -> alongside /proc/self/exe -> PATH, and
+        # on NixOS the sibling of the store binary is the UNCAPPED store copy — it would run, and
+        # be refused every priority class, silently. This env is the whole reason the override
+        # exists. `config.security.wrapperDir` rather than a hard-coded /run/wrappers/bin so an
+        # operator who has moved it is still correct.
+        #
+        # NixOS renders `Environment=` before `EnvironmentFile=`, so `settings`/`environmentFile`
+        # can still override this (or set it to `off` to force the in-process encoder) — the same
+        # "an operator's own override still wins" posture as PUNKTFUNK_GAMESCOPE_BIN above.
+        environment.PUNKTFUNK_ENCODE_WORKER = "${config.security.wrapperDir}/punktfunk-encode-worker";
         serviceConfig = {
+          # The store path DIRECTLY — not a capability wrapper. /proc/<pid>/exe then resolves to the
+          # very path packages.nix substituted into io.unom.Punktfunk.Host.desktop's Exec=, which is
+          # what lets KWin identify the host and grant it the screencast/fake-input protocols (see
+          # the note above the firewall block).
           ExecStart =
             "${cfg.host.package}/bin/punktfunk-host serve" + optionalString cfg.host.gamestream " --gamestream";
           Restart = "on-failure";
@@ -427,7 +536,15 @@ in
       environment.systemPackages = [ cfg.web.package ];
 
       networking.firewall = mkIf cfg.web.openFirewall {
-        allowedTCPPorts = [ 47992 ]; # console HTTPS (packaging/linux/punktfunk-web.xml)
+        # 47992 = the console itself. 47993 = the SEPARATE ORIGIN its plugin UIs are served from
+        # (console port + 1): same host and certificate, different port, so the browser's same-origin
+        # policy keeps a plugin from acting as the logged-in operator. Leaving it closed does not
+        # degrade gracefully — every plugin interface is simply an empty panel from any other device.
+        # Keep in step with packaging/linux/punktfunk-web.xml and punktfunk.ufw.
+        allowedTCPPorts = [
+          47992
+          47993
+        ];
       };
 
       # First-run setup: generate the console login password once, in the user's config dir, and
@@ -458,6 +575,15 @@ in
         ];
         wants = [ "punktfunk-web-init.service" ];
         wantedBy = optional cfg.web.autoStart "default.target";
+        # Retry INDEFINITELY while the host is still writing the mgmt token + identity cert. The
+        # EnvironmentFile below is mandatory on purpose, so the unit genuinely fails until those
+        # exist — and systemd's default rate limit (5 starts / 10 s) against `RestartSec = 2` gives
+        # up permanently after ~10 s, which on an appliance is exactly the window before the host's
+        # first `serve` completes. A console enabled before the host's first run then stayed dead
+        # until someone restarted it by hand. The shipped unit (scripts/punktfunk-web.service) has
+        # carried this since that defect was found; it was missed in the port, while the comment
+        # below went on promising the behaviour it removes.
+        unitConfig.StartLimitIntervalSec = 0;
         environment = {
           PUNKTFUNK_MGMT_URL = "https://127.0.0.1:47990";
           PORT = "47992";
@@ -475,7 +601,11 @@ in
             "-%h/.config/punktfunk/web-password"
           ];
           ExecStart = "${cfg.web.package}/bin/punktfunk-web-server";
-          Restart = "on-failure";
+          # `always`, not `on-failure`: a console that exits 0 has still stopped serving, and
+          # `on-failure` would leave it down. An explicit `systemctl --user stop` is still honoured
+          # (Restart= never fights that). Matches scripts/punktfunk-web.service and the Windows
+          # web-run.cmd, both of which relaunch bun on ANY exit.
+          Restart = "always";
           RestartSec = 2;
         };
       };
@@ -504,6 +634,38 @@ in
           KillMode = "mixed";
           KillSignal = "SIGTERM";
           TimeoutStopSec = 30;
+
+          # Sandbox — the same confinement scripts/punktfunk-scripting.service gives the deb/rpm
+          # installs. The runner `import()`s the operator's own `.ts` files, so this is the one unit
+          # here that executes arbitrary code by design; without these it ran strictly LESS confined
+          # on NixOS than on every other channel. Read-only outside $HOME, no setuid re-escalation,
+          # and only the address families automation actually uses (loopback mgmt API, LAN/IPv6
+          # webhooks, unix sockets).
+          NoNewPrivileges = true;
+          # PrivateTmp deliberately OFF (field report 2026-08-03, the VirtualHere plugin). A
+          # plugin's whole job is integrating with things already running on this box, and on Linux
+          # those talk over /tmp: VirtualHere's client IPC is the FIFO pair /tmp/vhclient +
+          # /tmp/vhclient_response, X11 is /tmp/.X11-unix. A private /tmp hides all of it — the
+          # plugin launches the vendor binary fine and then cannot reach the daemon behind it,
+          # which presents as an error no amount of config fixes.
+          PrivateTmp = false;
+          ProtectSystem = "strict";
+          # ReadWritePaths puts back the write bit ProtectSystem=strict takes away: plugin state and
+          # ~/.config/punktfunk under $HOME, plus the /tmp above. A plugin that must write OUTSIDE
+          # $HOME (a game library on another mount) gets it with
+          #   systemctl --user edit punktfunk-scripting  →  [Service] ReadWritePaths=/mnt/games
+          # ⚠ ProtectSystem is a MOUNT-NAMESPACE option, and for a *user* unit that needs
+          # unprivileged user namespaces. On a kernel/config that restricts those it fails the unit
+          # rather than degrading — drop it via the same drop-in if this box is one of them.
+          ReadWritePaths = [
+            "%h"
+            "/tmp"
+          ];
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_INET6"
+          ];
         };
       };
     })

@@ -1,71 +1,102 @@
 # punktfunk-overlay
 
-Public Nix overlay for [unom/punktfunk](https://git.unom.io/unom/punktfunk): **upstream source + ordered local patches**, so lea (and other hosts) can stay aligned with upstream without carrying a long-lived source fork.
+Deliberate NixOS delta on [unom/punktfunk](https://git.unom.io/unom/punktfunk): **unom main + required patches + Valve master gamescope + session module**. Experimental patches are opt-in and issue-tracked.
 
-## What this is
+See **[AGENTS.md](./AGENTS.md)** for agent rules. Story lives in [GitHub issues](https://github.com/luxus/punktfunk-overlay/issues).
+
+## What you get
 
 | Piece | Role |
 | --- | --- |
-| `inputs.punktfunk-src` | Clean upstream git (flake = false) |
-| `patches/` | `git format-patch` series applied with `pkgs.applyPatches` |
-| `packages.*` | Crane builds from the **patched** tree (same as upstream packaging) |
-| `nixosModules.default` | Upstream NixOS module pointed at those packages |
+| `inputs.punktfunk-src` | Clean unom git (`flake = false`) |
+| `patches/required/` | Always applied (empty on 0.27 — NixOS wrap detect is upstream) |
+| `patches/experimental/` | Opt-in only (`services.punktfunk.overlay.experimentalPatches`) |
+| `patches/archive/` | Retired; never applied |
+| `packages/gamescope.nix` + `gamescope-patches/` | Valve **master** + HDR capture patches |
+| `modules/` | unom NixOS module + `session.nix` (packages, PATH, desktopSession default) |
+| `meta/patches.toml` | Every applied patch ↔ issue URL |
 
-## Consumer (e.g. luxusAi)
+## Session references
+
+- [KDE Plasma (KWin)](https://docs.punktfunk.unom.io/docs/kde)
+- [Steam / gamescope](https://docs.punktfunk.unom.io/docs/gamescope)
+
+Consumer user config: **hjem**, not home-manager.
+
+## Consumer (luxusAi)
+
+Single input — no vanilla unom flake beside this:
 
 ```nix
 {
-  inputs.punktfunk-overlay.url = "github:luxus/punktfunk-overlay";
-  # optional: share nixpkgs
-  # inputs.punktfunk-overlay.inputs.nixpkgs.follows = "nixpkgs";
+  inputs.punktfunk = {
+    url = "path:/home/luxus/projects/punktfunk-overlay"; # or github:luxus/punktfunk-overlay
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
-  # Was: inputs.punktfunk.url = "path:/…/punktfunk";
-  # Now:
-  #   imports = [ inputs.punktfunk-overlay.nixosModules.default ];
-  #   # package defaults come from the overlay flake
+  # imports = [ inputs.punktfunk.nixosModules.default ];
+  # services.punktfunk.host.enable = true;
+  # services.punktfunk.host.users = [ "you" ];
+  # Overlay defaults: host.desktopSession, VIDEO_SOURCE=virtual, packages, PATH.
+  # services.punktfunk.overlay.experimentalPatches = false; # default
 }
 ```
 
-If your config still names the input `punktfunk`:
+Host-only knobs (users, gamestream, firewall, RUST_LOG) stay in the consumer.
+Session/docs defaults live here (`modules/session.nix`).
 
-```nix
-punktfunk = {
-  url = "github:luxus/punktfunk-overlay";
-  inputs.nixpkgs.follows = "nixpkgs";
-};
-# imports = [ inputs.punktfunk.nixosModules.default ];
-```
-
-## Bump upstream
+## Bump unom (punktfunk main)
 
 ```bash
-nix flake update punktfunk-src
-# rebuild / nh os switch
+./scripts/update-punktfunk.sh              # flake update + required patch check
+./scripts/update-punktfunk.sh --ref-tree   # also reset ~/projects/punktfunk → unom/main
+./scripts/update-punktfunk.sh --build      # also nix build .#punktfunk-host
 ```
 
-If a patch fails to apply after a bump, refresh the series from a temporary checkout:
+## Bump gamescope (Valve master)
 
 ```bash
-git clone https://git.unom.io/unom/punktfunk /tmp/pf && cd /tmp/pf
-# cherry-pick or re-implement fixes, then:
-git format-patch origin/main -o /path/to/punktfunk-overlay/patches
+./scripts/update-gamescope.sh              # pin tip rev + hash in packages/gamescope.nix
+./scripts/update-gamescope.sh --check      # also verify gamescope-patches apply
+./scripts/update-gamescope.sh --build      # also nix build .#punktfunk-gamescope
 ```
 
-## Current patch series
+Note the bump on [issue #3](https://github.com/luxus/punktfunk-overlay/issues/3) when you land it.
 
-See `patches/0001-…` through `0009-…` — Nix packaging fixes, KWin Nix wrap detection, steam on host PATH, HDR colour/channel-order knobs, gamescope master pin (#2271 in-tree), etc.
+## Experimental encode investigation
 
-## Local drop-ins
+1. Measure baseline with experimental **off**.
+2. Open a delta issue with numbers.
+3. Add one `patches/experimental/*.patch` + `meta/patches.toml` entry + issue URL.
+4. `services.punktfunk.overlay.experimentalPatches = true;`
+5. Document proof; delete or promote.
 
-Session-specific systemd drop-ins (e.g. `~/.config/systemd/user/punktfunk-host.service.d/extra-path.conf`) stay on the machine; the module PATH fix lands in-tree via patch `0008` so a clean deploy does not need the drop-in after rebuild.
+## Skills
+
+```bash
+./scripts/setup-skills.sh   # ponytail + mattpocock/skills → .agents/skills/
+```
+
+Grok discovers `.agents/skills/` automatically.
+
+## Checks
+
+```bash
+./scripts/check-patch-meta.sh
+./scripts/check-gamescope-prs.sh   # needs network + gh
+nix build .#punktfunk-host
+nix build .#punktfunk-gamescope
+```
 
 ## Layout
 
 ```
-patches/          # format-patch series on unom/main
-modules/          # vendored nixos-module.nix (patched) — pure imports, no IFD
-flake.nix         # applyPatches → crane packages from packaging/nix
+AGENTS.md
+packages/gamescope.nix
+modules/{default,nixos-module,session}.nix
+patches/{required,experimental,archive}/
+gamescope-patches/
+meta/patches.toml
+scripts/
+.agents/skills/   # after setup-skills.sh
 ```
-
-When you change only packaging/nix on a patch refresh, also re-copy
-`packaging/nix/nixos-module.nix` → `modules/nixos-module.nix`.

@@ -1,0 +1,138 @@
+diff --git a/crates/pf-vdisplay/src/vdisplay/linux/gamescope.rs b/crates/pf-vdisplay/src/vdisplay/linux/gamescope.rs
+index d7cf75b..2a27cd3 100644
+--- a/crates/pf-vdisplay/src/vdisplay/linux/gamescope.rs
++++ b/crates/pf-vdisplay/src/vdisplay/linux/gamescope.rs
+@@ -630,7 +630,10 @@ pub fn foreign_gamescope_running() -> bool {
+         let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) else {
+             continue;
+         };
+-        if !matches!(comm.trim(), "gamescope" | "gamescope-wl") {
++        // `comm_is` also covers NixOS `.<name>-wrapped` truncations (TASK_COMM_LEN=15).
++        if !(crate::session::comm_is(comm.trim(), "gamescope")
++            || crate::session::comm_is(comm.trim(), "gamescope-wl"))
++        {
+             continue;
+         }
+         if !descends_from(pid, our_pid) {
+diff --git a/crates/pf-vdisplay/src/vdisplay/session.rs b/crates/pf-vdisplay/src/vdisplay/session.rs
+index d95e6cc..490d2f4 100644
+--- a/crates/pf-vdisplay/src/vdisplay/session.rs
++++ b/crates/pf-vdisplay/src/vdisplay/session.rs
+@@ -311,8 +311,8 @@ pub fn detect_active_session() -> ActiveSession {
+     let dbus = default_bus(&env, &xdg_runtime_dir);
+ 
+     // Process probe: the running graphical compositor of THIS uid decides the kind. Priority lets
+-    // a real desktop (kwin/gnome/sway) win over a leftover gamescope child. comm names mirror the
+-    // `pkill -x` discipline (exact, ≤15 chars so untruncated).
++    // a real desktop (kwin/gnome/sway) win over a leftover gamescope child. Matching is via
++    // [`comm_is`] (exact `comm`, plus NixOS `.<name>-wrapped` truncations — TASK_COMM_LEN is 15).
+     let mut kind = ActiveKind::None;
+     let mut best = 0u8;
+     // The winning compositor's PID — kept so a same-kind compositor RESTART (a new PID) bumps the
+@@ -335,15 +335,8 @@ pub fn detect_active_session() -> ActiveSession {
+             let Ok(comm) = std::fs::read_to_string(pid_path.join("comm")) else {
+                 continue;
+             };
+-            let (k, prio) = match comm.trim() {
+-                "gamescope" | "gamescope-wl" => (ActiveKind::Gaming, 1),
+-                "kwin_wayland" => (ActiveKind::DesktopKde, 4),
+-                "gnome-shell" => (ActiveKind::DesktopGnome, 4),
+-                // Hyprland is its own backend (hyprctl + xdph) — split it out of the sway/river
+-                // wlroots-proper family (design/hyprland-support.md D1).
+-                "Hyprland" | "hyprland" => (ActiveKind::DesktopHyprland, 4),
+-                "sway" | "river" => (ActiveKind::DesktopWlroots, 4),
+-                _ => continue,
++            let Some((k, prio)) = classify_compositor_comm(comm.trim()) else {
++                continue;
+             };
+             let pid = name.parse::<u32>().ok();
+             if prio > best {
+@@ -410,6 +403,50 @@ pub fn detect_active_session() -> ActiveSession {
+     }
+ }
+ 
++/// True when `/proc/<pid>/comm` names the binary `name`.
++///
++/// On distro packages this is usually an exact match (`kwin_wayland`). On NixOS the real
++/// executable is rewritten to `.<name>-wrapped`, and the kernel only stores the first 15 bytes of
++/// that basename in `comm` (`TASK_COMM_LEN`), so a live KWin shows up as `.kwin_wayland-w` rather
++/// than `kwin_wayland`. A leading `.` is stripped; anything that then equals `name` or continues
++/// with `-` (the wrap/truncation suffix) counts.
++///
++/// The `_wrapper` helper process is deliberately not matched: its basename is
++/// `.<name>_wrapper-wrapped` → e.g. `.kwin_wayland_w`, which continues with `_` rather than `-`.
++#[cfg(target_os = "linux")]
++pub(crate) fn comm_is(comm: &str, name: &str) -> bool {
++    let c = comm.trim();
++    if c == name {
++        return true;
++    }
++    let c = c.strip_prefix('.').unwrap_or(c);
++    c == name || c.starts_with(&format!("{name}-"))
++}
++
++/// Map a `/proc/<pid>/comm` string to `(kind, priority)` for the live-session probe, or `None`
++/// when it is not a compositor we drive. Priority lets a real desktop beat a leftover gamescope.
++#[cfg(target_os = "linux")]
++fn classify_compositor_comm(comm: &str) -> Option<(ActiveKind, u8)> {
++    if comm_is(comm, "gamescope") || comm_is(comm, "gamescope-wl") {
++        return Some((ActiveKind::Gaming, 1));
++    }
++    if comm_is(comm, "kwin_wayland") {
++        return Some((ActiveKind::DesktopKde, 4));
++    }
++    if comm_is(comm, "gnome-shell") {
++        return Some((ActiveKind::DesktopGnome, 4));
++    }
++    // Hyprland is its own backend (hyprctl + xdph) — split it out of the sway/river
++    // wlroots-proper family (design/hyprland-support.md D1).
++    if comm_is(comm, "Hyprland") || comm_is(comm, "hyprland") {
++        return Some((ActiveKind::DesktopHyprland, 4));
++    }
++    if comm_is(comm, "sway") || comm_is(comm, "river") {
++        return Some((ActiveKind::DesktopWlroots, 4));
++    }
++    None
++}
++
+ /// Find the live Hyprland instance signature (`HYPRLAND_INSTANCE_SIGNATURE`) for our uid. Trust a
+ /// valid inherited value first (the host launched inside the session); otherwise pick the
+ /// newest-mtime instance directory under `$XDG_RUNTIME_DIR/hypr/` that we own and that still has a
+@@ -699,6 +736,37 @@ pub fn settle_desktop_portal(_chosen: Compositor) {}
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn comm_is_matches_exact_and_nix_wrapped_truncations() {
++        // Distro package: bare basename.
++        assert!(comm_is("kwin_wayland", "kwin_wayland"));
++        assert!(comm_is("kwin_wayland\n", "kwin_wayland"));
++        // NixOS: `.<name>-wrapped` truncated to TASK_COMM_LEN (15).
++        assert!(comm_is(".kwin_wayland-w", "kwin_wayland"));
++        assert!(comm_is(".gamescope-wrap", "gamescope"));
++        assert!(comm_is(".gnome-shell-wr", "gnome-shell"));
++        assert!(comm_is(".Hyprland-wrapp", "Hyprland"));
++        // Full untruncated wrap form (short names fit in 15).
++        assert!(comm_is(".sway-wrapped", "sway"));
++        // Negatives: unrelated, and the Nix `_wrapper` helper (underscore, not hyphen).
++        assert!(!comm_is("kwin_x11", "kwin_wayland"));
++        assert!(!comm_is(".kwin_wayland_w", "kwin_wayland"));
++        assert!(!comm_is("not-kwin", "kwin_wayland"));
++    }
++
++    #[test]
++    fn classify_compositor_comm_nix_kwin_is_desktop_kde() {
++        let (k, prio) = classify_compositor_comm(".kwin_wayland-w").unwrap();
++        assert_eq!(k, ActiveKind::DesktopKde);
++        assert_eq!(prio, 4);
++        // Wrapper process must not steal the detection.
++        assert!(classify_compositor_comm(".kwin_wayland_w").is_none());
++        assert_eq!(
++            classify_compositor_comm("gamescope-wl").map(|(k, _)| k),
++            Some(ActiveKind::Gaming)
++        );
++    }
++
+     /// A scratch runtime dir with the sway-ipc sockets named in `pids`, plus the uid the names are
+     /// built from. Removed on drop.
+     struct FakeRuntime {
