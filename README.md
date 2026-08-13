@@ -9,7 +9,7 @@ See **[AGENTS.md](./AGENTS.md)** for agent rules. Story lives in [GitHub issues]
 | Piece | Role |
 | --- | --- |
 | `inputs.punktfunk-src` | Clean unom git (`flake = false`) |
-| `patches/required/` | Always applied (empty on 0.27 — NixOS wrap detect is upstream) |
+| `patches/required/` | Always applied (empty on 0.28 — NixOS wrap detect is upstream) |
 | `patches/experimental/` | Opt-in only (`services.punktfunk.overlay.experimentalPatches`) |
 | `patches/archive/` | Retired; never applied |
 | `packages/gamescope.nix` + `gamescope-patches/` | Valve **master** + HDR capture patches |

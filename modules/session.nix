@@ -71,5 +71,16 @@ in
         ];
       };
     })
+
+    # Host `runner_command()` only checks FHS / SteamOS user paths, never PATH
+    # (`/usr/bin/punktfunk-scripting` or `~/.local/bin/…`). Console plugin
+    # installs use that seam, so NixOS looks uninstalled. SteamOS already uses
+    # the ~/.local/bin wrapper — put the same link here.
+    # https://github.com/luxus/punktfunk-overlay/issues/7
+    (mkIf cfg.scripting.enable {
+      systemd.user.tmpfiles.rules = [
+        "L+ %h/.local/bin/punktfunk-scripting - - - - ${pkg "punktfunk-scripting"}/bin/punktfunk-scripting"
+      ];
+    })
   ];
 }
