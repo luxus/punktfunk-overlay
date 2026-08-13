@@ -5,7 +5,7 @@
 # Tracks master (not only the nixpkgs tag), same stance as polaris/gamescope-polaris:
 # #2271 (bSampled + XBGR RGB10 fallback) is already on main — we do NOT vendor it.
 # Our remaining patches: HDR SPA formats + paint (0001), optional cursor composite
-# (0002), and the +pfhdrN version stamp (0003).
+# (0002), +pfhdrN version stamp (0003), PW texture teardown on steamcompmgr (0004).
 #
 # An override rather than a from-scratch derivation on purpose: gamescope vendors
 # wlroots, vkroots, libliftoff, … as git submodules; nixpkgs already solves the
@@ -22,9 +22,8 @@
   patchDir,
 }:
 let
-  # Master tip 2026-08-01 — includes ValveSoftware/gamescope#2271.
-  # Same pin as polaris `chore/drop-gamescope-2271-patch`.
-  gamescopeRev = "5fb8dce4a09d0a68d097b9faf9513782106bc843";
+  # Master tip 2026-08-11 — includes ValveSoftware/gamescope#2271.
+  gamescopeRev = "9ab4ace0083232e66a9922d78880890e71607001";
 
   # Master switched glm/stb from system headers to meson wrap-git subprojects.
   # Vendoring keeps wrap_mode=nodownload happy in the nix sandbox.
@@ -57,14 +56,14 @@ let
 in
 unwrapped.overrideAttrs (old: {
   pname = "punktfunk-gamescope";
-  version = "0-unstable-2026-08-04";
+  version = "0-unstable-2026-08-11";
 
   src = fetchFromGitHub {
     owner = "ValveSoftware";
     repo = "gamescope";
     rev = gamescopeRev;
     fetchSubmodules = true;
-    hash = "sha256-pGBiO+7LSdIc0k9K+SQnv/Og2DYD/cjvOImxIl91L2A=";
+    hash = "sha256-JaJpGX4GOupMQ9drsqO2aMfLWLqn7SOtEPEtZkd9neA=";
   };
 
   # Keep only nixpkgs packaging patches that still apply on master.

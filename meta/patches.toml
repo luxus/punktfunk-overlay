@@ -30,6 +30,15 @@ upstream_disposition = "none"
 gamescope_prs = []
 punktfunk_prs = []
 
+[[patch]]
+file = "gamescope-patches/0004-pipewire-destroy-capture-textures-on-the-compositor-thread.patch"
+tier = "gamescope"
+issue = "https://github.com/luxus/punktfunk-overlay/issues/9"
+summary = "Destroy PipeWire capture textures on steamcompmgr, not the PW thread"
+upstream_disposition = "gamescope-pr"
+gamescope_prs = []
+punktfunk_prs = []
+
 # --- archive (not applied; story only) ---
 
 [[patch]]
