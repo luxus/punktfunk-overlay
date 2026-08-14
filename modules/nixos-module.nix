@@ -55,6 +55,27 @@ let
 
   hostSettingsFile = pkgs.writeText "punktfunk-host.env" (renderEnv cfg.host.settings);
 
+  # WHICH users' `systemd --user` instances may run these units — and why they need saying at all.
+  #
+  # `systemd.user.*` installs into EVERY user's manager; there is no per-user form of it in NixOS.
+  # Combined with `autoStart` putting the units in `default.target`, that includes **root**, whose
+  # `user@0.service` springs into existence the moment anybody so much as SSHes in as root. Root's
+  # copy of the host then wins the race for the fixed ports and the desktop user's copy fails
+  # forever on `bind RTSP 48010: Address already in use` — with every other listener in its log
+  # having bound fine, so it reads like a clash with some unrelated program rather than a second
+  # copy of itself. MEASURED 2026-08-14 on a fresh NixOS 26.05 box.
+  #
+  # `host.users` is already documented as "the host runs as these users' systemd --user service",
+  # so it is the right scope. When it is empty we cannot name the intended user, so fall back to
+  # excluding system users — which is precisely what keeps root out — and leave the module header's
+  # manual `systemctl --user enable --now punktfunk-host` route working for any normal login.
+  #
+  # ⚠ The `|` prefix is load-bearing: it makes each entry a TRIGGERING condition, and systemd ORs
+  # those. Plain repeated `ConditionUser=` lines are ANDed, so a two-user list would match NOBODY.
+  # Non-triggering conditions on the same unit (punktfunk-web-init's ConditionPathExists) still
+  # have to hold, which is the behaviour we want.
+  userScope = if cfg.host.users == [ ] then [ "!@system" ] else map (u: "|${u}") cfg.host.users;
+
   # Native punktfunk/1 ports (control plane + discovery + mgmt API). The media data plane is an
   # ephemeral per-session UDP port the host hole-punches, so nothing fixed to open (see
   # packaging/linux/punktfunk.ufw).
@@ -106,6 +127,10 @@ in
           Start the host automatically in every user's graphical session (adds it to the user
           `default.target`). For a login-less appliance, also enable lingering for the host user
           (`users.users.<name>.linger = true`) so the user service comes up at boot.
+
+          "Every user" is bounded by `host.users` via `ConditionUser=` — without that bound this
+          option also starts a host in ROOT's user manager the moment anybody logs in as root, and
+          that copy takes the ports from the real one. Set `host.users` on a multi-user box.
         '';
       };
 
@@ -147,6 +172,15 @@ in
           usbip/vhci nodes the virtual Steam Deck pad attaches through. The second is separate on
           purpose — it can emulate arbitrary USB hardware, so only list users you would trust with
           that. The host runs as these users' `systemd --user` service.
+
+          This list ALSO scopes the units themselves: they carry a `ConditionUser=` for these
+          users, so no other user's `systemd --user` instance can start them. That matters because
+          `systemd.user.*` installs into every user's manager — including root's, which exists as
+          soon as anyone logs in as root — and a second host silently wins the race for the fixed
+          ports, leaving the real one restarting forever on "Address already in use".
+
+          Left empty, the units are merely refused to SYSTEM users (`ConditionUser=!@system`), so
+          any normal login can still run the host by hand and root still cannot.
         '';
       };
 
@@ -466,6 +500,9 @@ in
       systemd.user.services.punktfunk-host = {
         description = "punktfunk GameStream + punktfunk/1 streaming host";
         documentation = [ "https://git.unom.io/unom/punktfunk" ];
+        # Keep root (and every other system user) from starting a second host that steals the
+        # fixed ports from the desktop user's — see `userScope`.
+        unitConfig.ConditionUser = userScope;
         # Soft ordering: the host listens immediately and only touches the compositor per session.
         after = [ "pipewire.service" ] ++ optional cfg.host.desktopSession "graphical-session.target";
         wants = [ "pipewire.service" ];
@@ -487,7 +524,15 @@ in
         ]
         # The HDR-capable gamescope, if enabled. On PATH rather than pinned through
         # PUNKTFUNK_GAMESCOPE_BIN so an operator's own override of that env still wins.
-        ++ optional cfg.host.gamescopeHdr cfg.host.gamescopePackage;
+        ++ optional cfg.host.gamescopeHdr cfg.host.gamescopePackage
+        # The plugin runner, if enabled. Package ops (`plugins add`, and the console's store jobs,
+        # which run INSIDE this service) exec `punktfunk-scripting`; its resolution order is
+        # PUNKTFUNK_SCRIPTING -> beside the host binary -> PATH -> the /usr and ~/.local layouts.
+        # On NixOS only the PATH rung can ever match: the runner is a derivation of its OWN, so it
+        # is never beside the host binary and nothing lands in /usr. `environment.systemPackages`
+        # covers an operator's interactive shell but NOT this unit, whose PATH is exactly this
+        # list — without it the console reports a running, enabled runner as "not installed".
+        ++ optional cfg.scripting.enable cfg.scripting.package;
         # Point the host at the WRAPPED encode worker (see `security.wrappers` above). The host's
         # own resolution order is PUNKTFUNK_ENCODE_WORKER -> alongside /proc/self/exe -> PATH, and
         # on NixOS the sibling of the store binary is the UNCAPPED store copy — it would run, and
@@ -499,6 +544,15 @@ in
         # can still override this (or set it to `off` to force the in-process encoder) — the same
         # "an operator's own override still wins" posture as PUNKTFUNK_GAMESCOPE_BIN above.
         environment.PUNKTFUNK_ENCODE_WORKER = "${config.security.wrapperDir}/punktfunk-encode-worker";
+        # Where our Vulkan WSI layer's manifest lives. The host defaults to the FHS path every
+        # distro package uses, which no NixOS box has — here the layer travels inside the gamescope
+        # derivation, so point at it. Without this a game nested under the compositor gets no HDR10
+        # swapchain at all: that layer is the only route to one, and the host falls back to
+        # disabling the system layer, which is HDR-less by construction.
+        #
+        # Same override posture as PUNKTFUNK_GAMESCOPE_BIN: `Environment=` renders before
+        # `EnvironmentFile=`, so an operator's `settings` still wins.
+        environment.PUNKTFUNK_GAMESCOPE_WSI_LAYER_DIR = mkIf cfg.host.gamescopeHdr "${cfg.host.gamescopePackage}/lib/punktfunk/vulkan/implicit_layer.d";
         serviceConfig = {
           # The store path DIRECTLY — not a capability wrapper. /proc/<pid>/exe then resolves to the
           # very path packages.nix substituted into io.unom.Punktfunk.Host.desktop's Exec=, which is
@@ -555,7 +609,12 @@ in
       systemd.user.services.punktfunk-web-init = {
         description = "punktfunk web console first-run setup (login password)";
         documentation = [ "https://git.unom.io/unom/punktfunk" ];
-        unitConfig.ConditionPathExists = "!%h/.config/punktfunk/web-password";
+        # ⚠ ConditionUser here is TRIGGERING (`|`) and ConditionPathExists is not, so systemd
+        # requires the path condition AND at least one user condition — which is the intent.
+        unitConfig = {
+          ConditionPathExists = "!%h/.config/punktfunk/web-password";
+          ConditionUser = userScope;
+        };
         path = [ pkgs.coreutils ];
         serviceConfig = {
           Type = "oneshot";
@@ -571,6 +630,8 @@ in
       systemd.user.services.punktfunk-web = {
         description = "punktfunk management web console";
         documentation = [ "https://git.unom.io/unom/punktfunk" ];
+        # Same scoping as the host: root's instance would take 47992 from the real one.
+        unitConfig.ConditionUser = userScope;
         after = [
           "punktfunk-web-init.service"
           "punktfunk-host.service"
@@ -622,6 +683,8 @@ in
       systemd.user.services.punktfunk-scripting = {
         description = "punktfunk plugin/script runner";
         documentation = [ "https://git.unom.io/unom/punktfunk" ];
+        # Same scoping as the host: a root-side runner would talk to the wrong session's mgmt API.
+        unitConfig.ConditionUser = userScope;
         # Plugins talk to the host's loopback mgmt API; order after it (soft — the runner backs off
         # and retries per unit, so this is ordering only, not a hard requirement).
         after = [ "punktfunk-host.service" ];

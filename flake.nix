@@ -87,6 +87,7 @@
               mkPackages system experimentalPatches "punktfunk-src-experimental";
           gamescope = pkgs.callPackage ./packages/gamescope.nix {
             patchDir = ./gamescope-patches;
+            manifestRewriter = punktfunk-src + "/packaging/gamescope/rewrite-wsi-layer-manifest.py";
           };
           withExpAliases = lib.mapAttrs' (name: value: {
             name = "${name}-experimental";

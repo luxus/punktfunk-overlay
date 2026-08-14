@@ -6,6 +6,8 @@
 # #2271 (bSampled + XBGR RGB10 fallback) is already on main — we do NOT vendor it.
 # Our remaining patches: HDR SPA formats + paint (0001), optional cursor composite
 # (0002), +pfhdrN version stamp (0003), PW texture teardown on steamcompmgr (0004).
+# WSI layer is built with the compositor and re-homed under $out/lib/punktfunk so
+# the NixOS module can set PUNKTFUNK_GAMESCOPE_WSI_LAYER_DIR (unom 0.28.1).
 #
 # An override rather than a from-scratch derivation on purpose: gamescope vendors
 # wlroots, vkroots, libliftoff, … as git submodules; nixpkgs already solves the
@@ -19,7 +21,9 @@
   lib,
   gamescope,
   fetchFromGitHub,
+  python3,
   patchDir,
+  manifestRewriter,
 }:
 let
   # Master tip 2026-08-11 — includes ValveSoftware/gamescope#2271.
@@ -107,8 +111,30 @@ unwrapped.overrideAttrs (old: {
   # Expose the compositor under our own name, ADDITIVELY — a symlink beside
   # nixpkgs' own layout rather than a rename plus a sweep of everything else.
   # (See git history: sweeping breaks wrapProgram / gamescopereaper / ReShade.)
+  #
+  # Also ship the WSI layer we built beside this compositor, rewritten to a
+  # distinct name/path/enable var so it sits next to the system FROG layer.
+  # A game nested here gets its HDR10 swapchain from this layer or from nowhere;
+  # a layer built for a different gamescope makes the compositor reject
+  # swapchain_feedback. unom 0.28.1's module points
+  # PUNKTFUNK_GAMESCOPE_WSI_LAYER_DIR at $out/lib/punktfunk/vulkan/implicit_layer.d.
   postInstall = (old.postInstall or "") + ''
     ln -s gamescope $out/bin/punktfunk-gamescope
+
+    layerSo=$(find $out -type f -name 'libVkLayer_*gamescope_wsi*.so' | head -1)
+    layerJson=$(find $out -type f -name '*gamescope_wsi*.json' | head -1)
+    if [ -z "$layerSo" ] || [ -z "$layerJson" ]; then
+      echo "punktfunk-gamescope: this gamescope built no WSI layer, so no game under the" >&2
+      echo "                     compositor could ever obtain an HDR10 swapchain" >&2
+      exit 1
+    fi
+    ${python3}/bin/python3 ${manifestRewriter} \
+      "$layerJson" "$TMPDIR/pf-layer.json" \
+      "$out/lib/punktfunk/libVkLayer_PUNKTFUNK_gamescope_wsi.so"
+    install -Dm0755 "$layerSo" \
+      "$out/lib/punktfunk/libVkLayer_PUNKTFUNK_gamescope_wsi.so"
+    install -Dm0644 "$TMPDIR/pf-layer.json" \
+      "$out/lib/punktfunk/vulkan/implicit_layer.d/punktfunk_gamescope_wsi.json"
   '';
 
   # `gamescope --version` exits non-zero on some builds; the grep is the real assertion.
@@ -117,6 +143,10 @@ unwrapped.overrideAttrs (old: {
     runHook preInstallCheck
     $out/bin/punktfunk-gamescope --version 2>&1 | grep -q '+pfhdr' \
       || { echo "punktfunk-gamescope: the +pfhdr marker is missing — the patches did not take"; exit 1; }
+    lib=$(sed -n 's/.*"library_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      $out/lib/punktfunk/vulkan/implicit_layer.d/punktfunk_gamescope_wsi.json)
+    [ -f "$lib" ] \
+      || { echo "punktfunk-gamescope: the layer manifest points at $lib, which is not installed"; exit 1; }
     runHook postInstallCheck
   '';
 
