@@ -26,7 +26,8 @@ Behavioral rules for humans and coding agents working in this repository.
 | --- | --- | --- |
 | `required` | `patches/required/` | yes |
 | `experimental` | `patches/experimental/` | no (opt-in) |
-| `gamescope` | `gamescope-patches/` | yes (on `punktfunk-gamescope` only) |
+| unom gamescope | `punktfunk-src` `packaging/gamescope/patches/` | yes (on `punktfunk-gamescope` only) |
+| `gamescope` extras | `gamescope-patches/` | yes (after unom, on `punktfunk-gamescope` only) |
 | `archive` | `patches/archive/` | never |
 
 Rules:

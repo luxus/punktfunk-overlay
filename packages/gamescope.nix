@@ -1,13 +1,13 @@
-# `punktfunk-gamescope` — ValveSoftware/gamescope **master** carrying punktfunk's
-# `pipewire-hdr` patches, exposed under its own name so it sits BESIDE the system
+# `punktfunk-gamescope` — ValveSoftware/gamescope **master** plus unom's full
+# `pipewire-hdr` series, exposed under its own name so it sits BESIDE the system
 # gamescope instead of replacing it.
 #
 # Tracks master (not only the nixpkgs tag), same stance as polaris/gamescope-polaris:
 # #2271 (bSampled + XBGR RGB10 fallback) is already on main — we do NOT vendor it.
-# Our remaining patches: HDR SPA formats + paint (0001), optional cursor composite
-# (0002), +pfhdrN version stamp (0003), PW texture teardown on steamcompmgr (0004).
-# WSI layer is built with the compositor and re-homed under $out/lib/punktfunk so
-# the NixOS module can set PUNKTFUNK_GAMESCOPE_WSI_LAYER_DIR (unom 0.28.1).
+# Functional patches come from unom (`punktfunk-src/packaging/gamescope/patches`);
+# `gamescope-patches/` is overlay extras only. WSI layer is built with the compositor
+# and re-homed under $out/lib/punktfunk so the NixOS module can set
+# PUNKTFUNK_GAMESCOPE_WSI_LAYER_DIR.
 #
 # An override rather than a from-scratch derivation on purpose: gamescope vendors
 # wlroots, vkroots, libliftoff, … as git submodules; nixpkgs already solves the
@@ -15,14 +15,15 @@
 # master tip, filter nixpkgs patches that still apply, add ours, and vendor glm/stb
 # wrap-git deps so the sandbox stays offline.
 #
-# Bump: update `gamescopeRev` + `src.hash` (and glm/stb only if wraps move), then
-# re-check `packaging/gamescope/patches/*` apply cleanly.
+# Bump Valve pin: update `gamescopeRev` + `src.hash` (and glm/stb only if wraps
+# move), then `scripts/update-gamescope.sh --check`. Unom series rides
+# `punktfunk-src`; extras live in `gamescope-patches/`.
 {
   lib,
   gamescope,
   fetchFromGitHub,
   python3,
-  patchDir,
+  patchDirs,
   manifestRewriter,
 }:
 let
@@ -72,7 +73,7 @@ unwrapped.overrideAttrs (old: {
 
   # Keep only nixpkgs packaging patches that still apply on master.
   # Pending upstream fetchpatches on 3.16.x are already in this tip.
-  # Our patches: read the DIRECTORY (lexicographic 000N- order).
+  # Then unom's series, then overlay extras — each dir in lexicographic 000N- order.
   patches =
     (builtins.filter (
       p:
@@ -81,9 +82,12 @@ unwrapped.overrideAttrs (old: {
       in
       lib.hasInfix "shaders-path" s || lib.hasInfix "gamescopereaper" s
     ) (old.patches or [ ]))
-    ++ map (f: "${patchDir}/${f}") (
-      builtins.filter (lib.hasSuffix ".patch") (builtins.attrNames (builtins.readDir patchDir))
-    );
+    ++ lib.concatMap (
+      dir:
+      map (f: "${dir}/${f}") (
+        builtins.filter (lib.hasSuffix ".patch") (builtins.attrNames (builtins.readDir dir))
+      )
+    ) patchDirs;
 
   # Master dropped glm_include_dir / stb_include_dir meson options.
   mesonFlags = [

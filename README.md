@@ -12,8 +12,8 @@ See **[AGENTS.md](./AGENTS.md)** for agent rules. Story lives in [GitHub issues]
 | `patches/required/` | Always applied (empty on 0.28 — NixOS wrap detect is upstream) |
 | `patches/experimental/` | Opt-in only (`services.punktfunk.overlay.experimentalPatches`) |
 | `patches/archive/` | Retired; never applied |
-| `packages/gamescope.nix` + `gamescope-patches/` | Valve **master** + HDR capture patches |
-| `modules/` | unom NixOS module + `session.nix` (packages, PATH, desktopSession default) |
+| `packages/gamescope.nix` + unom `packaging/gamescope/patches/` + `gamescope-patches/` | Valve **master** + **all** unom HDR/capture patches; overlay extras only |
+| `modules/` | unom NixOS module (from `punktfunk-src`) + `session.nix` (packages, PATH, desktopSession default) |
 | `meta/patches.toml` | Every applied patch ↔ issue URL |
 
 ## Session references
@@ -61,7 +61,7 @@ Session/docs defaults live here (`modules/session.nix`).
 ./scripts/update-gamescope.sh --build      # also nix build .#punktfunk-gamescope
 ```
 
-Note the bump on [issue #3](https://github.com/luxus/punktfunk-overlay/issues/3) when you land it.
+Note the bump on [issue #3](https://github.com/luxus/punktfunk-overlay/issues/3). Unom gamescope patches come from `punktfunk-src` ([#11](https://github.com/luxus/punktfunk-overlay/issues/11)).
 
 ## Experimental encode investigation
 
@@ -93,9 +93,9 @@ nix build .#punktfunk-gamescope
 ```
 AGENTS.md
 packages/gamescope.nix
-modules/{default,nixos-module,session}.nix
+modules/{default,session}.nix
 patches/{required,experimental,archive}/
-gamescope-patches/
+gamescope-patches/          # extras only; unom series is in punktfunk-src
 meta/patches.toml
 scripts/
 .agents/skills/   # after setup-skills.sh

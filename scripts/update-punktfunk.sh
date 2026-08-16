@@ -88,6 +88,38 @@ if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi
 
+echo "→ check unom + overlay gamescope patches on Valve pin …"
+gs_rev="$(
+  python3 - "$ROOT/packages/gamescope.nix" <<'PY'
+import re, pathlib, sys
+m = re.search(r'gamescopeRev = "([0-9a-f]+)"', pathlib.Path(sys.argv[1]).read_text())
+print(m.group(1) if m else "")
+PY
+)"
+if [[ -z "$gs_rev" ]]; then
+  echo "error: could not read gamescopeRev from packages/gamescope.nix" >&2
+  exit 1
+fi
+git clone --filter=blob:none --no-checkout "https://github.com/ValveSoftware/gamescope.git" "$work/gs" >/dev/null
+git -C "$work/gs" fetch --depth 1 origin "$gs_rev" >/dev/null
+git -C "$work/gs" checkout --detach FETCH_HEAD >/dev/null
+gs_fail=0
+shopt -s nullglob
+for p in "$work/pf/packaging/gamescope/patches"/*.patch "$ROOT/gamescope-patches"/*.patch; do
+  [[ -f "$p" ]] || continue
+  if git -C "$work/gs" apply "$p" 2>/dev/null; then
+    echo "  ok   $(basename "$p")"
+  else
+    echo "  FAIL $(basename "$p")" >&2
+    git -C "$work/gs" apply --check "$p" 2>&1 | sed 's/^/       /' || true
+    gs_fail=1
+  fi
+done
+if [[ "$gs_fail" -ne 0 ]]; then
+  echo "error: gamescope patches do not apply on ${gs_rev:0:7} — rebase extras or bump the Valve pin" >&2
+  exit 1
+fi
+
 if [[ "$SYNC_REF" -eq 1 ]]; then
   if [[ -d "$REF_TREE_PATH/.git" ]]; then
     echo "→ sync reference tree $REF_TREE_PATH → unom/main …"

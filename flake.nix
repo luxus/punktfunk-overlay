@@ -85,10 +85,21 @@
               baseline
             else
               mkPackages system experimentalPatches "punktfunk-src-experimental";
-          gamescope = pkgs.callPackage ./packages/gamescope.nix {
-            patchDir = ./gamescope-patches;
-            manifestRewriter = punktfunk-src + "/packaging/gamescope/rewrite-wsi-layer-manifest.py";
-          };
+          gamescope =
+            let
+              extraDir = ./gamescope-patches;
+              extraNames =
+                if builtins.pathExists extraDir then builtins.attrNames (builtins.readDir extraDir) else [ ];
+              extraPatches = lib.filter (lib.hasSuffix ".patch") extraNames;
+            in
+            pkgs.callPackage ./packages/gamescope.nix {
+              # unom series first; gamescope-patches/ is extras only (#11).
+              patchDirs = [
+                (punktfunk-src + "/packaging/gamescope/patches")
+              ]
+              ++ lib.optional (extraPatches != [ ]) extraDir;
+              manifestRewriter = punktfunk-src + "/packaging/gamescope/rewrite-wsi-layer-manifest.py";
+            };
           withExpAliases = lib.mapAttrs' (name: value: {
             name = "${name}-experimental";
             value = experimental.${name};

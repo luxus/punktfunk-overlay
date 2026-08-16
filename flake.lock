@@ -79,11 +79,11 @@
     "punktfunk-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1786706813,
-        "narHash": "sha256-1AP3HNVcVY8l7bCM1RvGtFxQ9CuTAlZuYKUYUvq7AX0=",
+        "lastModified": 1786881390,
+        "narHash": "sha256-Amy8LcIOQNcZqg9u6DMl06K6NIMh6qAnm02+OlD9T4I=",
         "ref": "refs/heads/main",
-        "rev": "ea5afbaa8c72a9597e9648d13e97f250b4394f4b",
-        "revCount": 3175,
+        "rev": "adf895ced1ff45dde93ddf994d3418abb5ab29fb",
+        "revCount": 3349,
         "type": "git",
         "url": "https://git.unom.io/unom/punktfunk"
       },

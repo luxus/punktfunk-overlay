@@ -1,43 +1,9 @@
-# Registry of every applied patch. See AGENTS.md and scripts/check-patch-meta.sh.
+# Registry of every applied *overlay* patch. See AGENTS.md and scripts/check-patch-meta.sh.
 # Archive entries are documentation only (not applied).
-
-[[patch]]
-file = "gamescope-patches/0001-pipewire-offer-10-bit-BT.2020-PQ-capture-formats-HDR.patch"
-tier = "gamescope"
-issue = "https://github.com/luxus/punktfunk-overlay/issues/3"
-summary = "HDR SPA formats for PipeWire capture (PF gamescope)"
-upstream_disposition = "gamescope-pr"
-gamescope_prs = [
-  "https://github.com/ValveSoftware/gamescope/pull/2270",
-]
-punktfunk_prs = []
-
-[[patch]]
-file = "gamescope-patches/0002-pipewire-optionally-composite-the-cursor-into-the-ca.patch"
-tier = "gamescope"
-issue = "https://github.com/luxus/punktfunk-overlay/issues/3"
-summary = "Optional cursor composite into PipeWire capture"
-upstream_disposition = "gamescope-pr"
-gamescope_prs = []
-punktfunk_prs = []
-
-[[patch]]
-file = "gamescope-patches/0003-punktfunk-stamp-the-version-banner-with-pfhdrN.patch"
-tier = "gamescope"
-issue = "https://github.com/luxus/punktfunk-overlay/issues/3"
-summary = "+pfhdrN version stamp for capability probe"
-upstream_disposition = "none"
-gamescope_prs = []
-punktfunk_prs = []
-
-[[patch]]
-file = "gamescope-patches/0004-pipewire-destroy-capture-textures-on-the-compositor-thread.patch"
-tier = "gamescope"
-issue = "https://github.com/luxus/punktfunk-overlay/issues/9"
-summary = "Destroy PipeWire capture textures on steamcompmgr, not the PW thread"
-upstream_disposition = "gamescope-pr"
-gamescope_prs = []
-punktfunk_prs = []
+#
+# Unom gamescope patches live in the punktfunk-src input
+# (packaging/gamescope/patches/) and are applied by packages/gamescope.nix.
+# Do not copy them here. gamescope-patches/ is extras only (#11).
 
 # --- archive (not applied; story only) ---
 

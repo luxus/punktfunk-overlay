@@ -3,13 +3,14 @@
 #
 # Usage:
 #   ./scripts/update-gamescope.sh           # pin rev + hash + version date
-#   ./scripts/update-gamescope.sh --check   # also git-apply --check gamescope-patches/
+#   ./scripts/update-gamescope.sh --check   # also apply unom series + gamescope-patches/ extras
 #   ./scripts/update-gamescope.sh --build   # also nix build .#punktfunk-gamescope
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GS_NIX="$ROOT/packages/gamescope.nix"
-PATCH_DIR="$ROOT/gamescope-patches"
+EXTRA_PATCH_DIR="$ROOT/gamescope-patches"
+REF_TREE_PATH="${HOME}/projects/punktfunk"
 OWNER=ValveSoftware
 REPO=gamescope
 BRANCH=master
@@ -132,10 +133,29 @@ if [[ "$CHECK" -eq 1 ]]; then
   git clone --filter=blob:none --no-checkout "https://github.com/${OWNER}/${REPO}.git" "$work/gs" >/dev/null
   git -C "$work/gs" fetch --depth 1 origin "$REV" >/dev/null
   git -C "$work/gs" checkout --detach FETCH_HEAD >/dev/null
+
+  pf_rev="$(
+    python3 - "$ROOT/flake.lock" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["nodes"]["punktfunk-src"]["locked"]["rev"])
+PY
+  )"
+  unom_patches=""
+  if [[ -d "$REF_TREE_PATH/.git" && "$(git -C "$REF_TREE_PATH" rev-parse HEAD)" == "$pf_rev" ]]; then
+    unom_patches="$REF_TREE_PATH/packaging/gamescope/patches"
+  else
+    git clone --filter=blob:none --no-checkout "https://git.unom.io/unom/punktfunk" "$work/pf" >/dev/null
+    git -C "$work/pf" fetch --depth 1 origin "$pf_rev" >/dev/null
+    git -C "$work/pf" checkout --detach FETCH_HEAD >/dev/null
+    unom_patches="$work/pf/packaging/gamescope/patches"
+  fi
+
   fail=0
   shopt -s nullglob
-  for p in "$PATCH_DIR"/*.patch; do
-    if git -C "$work/gs" apply --check "$p" 2>/dev/null; then
+  # Apply (not just --check) so later hunks see earlier ones, matching the nix apply order.
+  for p in "$unom_patches"/*.patch "$EXTRA_PATCH_DIR"/*.patch; do
+    [[ -f "$p" ]] || continue
+    if git -C "$work/gs" apply "$p" 2>/dev/null; then
       echo "  ok   $(basename "$p")"
     else
       echo "  FAIL $(basename "$p")" >&2
