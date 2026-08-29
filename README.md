@@ -37,13 +37,13 @@ Single input — no vanilla unom flake beside this:
   # imports = [ inputs.punktfunk.nixosModules.default ];
   # services.punktfunk.host.enable = true;
   # services.punktfunk.host.users = [ "you" ];
-  # Overlay defaults: host.desktopSession, VIDEO_SOURCE=virtual, packages, PATH.
+  # Overlay defaults: host.desktopSession, VIDEO_SOURCE=virtual, CLIPBOARD=on, packages, PATH.
   # services.punktfunk.overlay.experimentalPatches = false; # default
 }
 ```
 
 Host-only knobs (users, gamestream, firewall, RUST_LOG) stay in the consumer.
-Session/docs defaults live here (`modules/session.nix`).
+Session/docs defaults live here (`modules/session.nix`), including `PUNKTFUNK_CLIPBOARD=on`.
 
 ## Bump unom (punktfunk main)
 

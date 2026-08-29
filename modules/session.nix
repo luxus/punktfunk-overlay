@@ -53,8 +53,10 @@ in
 
       # Desktop path defaults (KDE/virtual displays docs). Override for pure gamescope appliance.
       # https://docs.punktfunk.unom.io/docs/kde
-      # unom leaves desktopSession off (appliance-safe); this overlay is for login desktops.
+      # unom leaves desktopSession / clipboard off (appliance-safe); this overlay is for login desktops.
+      # https://docs.punktfunk.unom.io/docs/clipboard
       services.punktfunk.host.settings.PUNKTFUNK_VIDEO_SOURCE = mkDefault "virtual";
+      services.punktfunk.host.settings.PUNKTFUNK_CLIPBOARD = mkDefault "on";
       services.punktfunk.host.desktopSession = mkDefault true;
     }
 
