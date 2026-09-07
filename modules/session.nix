@@ -61,7 +61,8 @@ in
     }
 
     (mkIf cfg.host.enable {
-      system.nixos.tags = [ "punktfunk-overlay" ] ++ optional exp "punktfunk-exp";
+      # Tag experimental-patch generations in the boot menu; baseline stays default.
+      system.nixos.tags = optional exp "punktfunk-exp";
 
       systemd.user.services.punktfunk-host = {
         # steam → system profile; kscreen-doctor → libkscreen (often only in the user
